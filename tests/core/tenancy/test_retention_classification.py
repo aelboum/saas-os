@@ -67,6 +67,10 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "core.permission_grant_ledger_deletion_requests",
         "core.permission_grant_ledger_deletion_approvals",
         "core.permission_grant_ledger_deletion_execution_authorizations",
+        # Audit identity P3a: tenant references, erasure markers, holds.
+        "core.audit_subject_links",
+        "core.audit_subject_erasures",
+        "core.audit_identity_holds",
         # Audit identity P1: platform references, erasure markers, holds.
         "core.platform_audit_subject_links",
         "core.platform_audit_subject_erasures",

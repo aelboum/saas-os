@@ -43,6 +43,7 @@ failing (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 6).
 
 from saas_os.core.audit_log.errors import (
     AuditLogEntryNotFoundError,
+    AuditSubjectLinkUnavailableError,
     ForbiddenMetadataKeyError,
     InvalidActionOrResourceError,
     InvalidActorError,
@@ -83,4 +84,5 @@ __all__ = [
     "ForbiddenMetadataKeyError",
     "ReservedMetadataKeyError",
     "AuditLogEntryNotFoundError",
+    "AuditSubjectLinkUnavailableError",
 ]

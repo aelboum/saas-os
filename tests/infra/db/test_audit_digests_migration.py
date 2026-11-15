@@ -144,6 +144,10 @@ def test_downgrade_and_upgrade_change_only_this_table(admin: Engine) -> None:
             "platform_audit_subject_links",
             "platform_audit_subject_erasures",
             "platform_audit_identity_holds",
+            # c7e3a9f2b4d8 (audit identity P3a): the tenant reference tables.
+            "audit_subject_links",
+            "audit_subject_erasures",
+            "audit_identity_holds",
         }
         assert _core_tables(admin) == tables - {"audit_digests"} - later
         command.upgrade(cfg, _REVISION)

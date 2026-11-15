@@ -62,6 +62,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from saas_os.core.audit_log import record_in_transaction
+from saas_os.core.audit_log.subjects import audit_subject_ref
 from saas_os.core.authority import CallerTypeError, SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.permission_grants.declarations import (
     PermissionGrantMigration,
@@ -327,7 +328,13 @@ def _apply_in_tenant(
                         metadata={
                             "namespace": namespace,
                             "migration_id": migration.id,
-                            "operator_user_id": str(caller.user_id),
+                            # The operator as this tenant's audit reference,
+                            # never the raw id (audit identity phase P3).
+                            "operator_user_subject_ref": str(
+                                audit_subject_ref(
+                                    session, tenant_id=tenant_id, user_id=caller.user_id
+                                )
+                            ),
                             "run_id": str(run_id),
                         },
                     )

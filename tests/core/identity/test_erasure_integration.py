@@ -39,6 +39,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
+from audit_references import clear_platform_audit_references
 from lifecycle_callers import PROVISIONING
 from saas_os.core.api_keys.service import create_api_key, validate_api_key
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
@@ -202,6 +203,12 @@ def _issuer_subject() -> tuple[str, str]:
 def _teardown(
     admin: sessionmaker[Session], tenant_ids: list[uuid.UUID], user_ids: list[uuid.UUID]
 ) -> None:
+    # Audit identity P3a: the tenant references and erasure markers the test
+    # made reference `core.tenants` and `core.users`. Emptied first, on their
+    # own connection, before this session's deletes take their locks (the
+    # helper's TRUNCATE would otherwise wait on this session's foreign-key
+    # checks while this session waits on it).
+    clear_platform_audit_references()
     with session_scope(session_factory=admin) as session:
         for tenant_id in tenant_ids:
             session.execute(

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 import warnings
@@ -29,7 +30,9 @@ import pytest
 
 from saas_os.core.audit_log import (
     ActorType,
+    AuditLogEntry,
     AuditOutcome,
+    ForbiddenMetadataKeyError,
     InvalidActorError,
     ReservedMetadataKeyError,
     record,
@@ -37,6 +40,7 @@ from saas_os.core.audit_log import (
     record_system_action_in_transaction,
 )
 from saas_os.core.audit_log import service as audit_service
+from saas_os.core.audit_log.metadata import trusted_metadata
 from saas_os.core.authority import (
     INITIATOR_UNAVAILABLE,
     Caller,
@@ -690,27 +694,26 @@ def test_record_system_action_records_the_three_roles_distinctly() -> None:
     assert "user_id" not in str(entry.entry_metadata)
 
 
-def test_record_system_action_refuses_a_user_initiator_and_records_a_service_account() -> None:
-    """Owner decision D2 (2026-11-02): a user initiator is refused before
-    any write -- a new audit record never stores a raw user id under
-    `initiated_by` -- and the refusal names no id. A principal initiator
-    that is still accepted (a service account) is recorded only as the
-    initiator, never as the row's actor."""
-    user_id = uuid.uuid4()
+def test_record_system_action_records_a_user_initiator_as_a_reference_and_a_service_account(
+    subject_refs: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """Owner decision D2 (2026-11-02), as completed by audit identity phase
+    P3: a user initiator is recorded as the user's tenant audit reference,
+    never as the raw user id, and never as the row's actor. A service
+    account is recorded only as the initiator, never as the row's actor."""
+    user_id = _D2_USER
     session = MagicMock()
-    with pytest.raises(InvalidActorError, match="D2") as refused:
-        record_system_action_in_transaction(
-            session,
-            tenant_id=_TENANT,
-            actor=_ACTOR,
-            action="export.finished",
-            resource_type="export",
-            initiated_by=Initiator.from_caller(UserCaller(user_id)),
-        )
-    session.add.assert_not_called()
-    session.flush.assert_not_called()
-    assert str(user_id) not in str(refused.value)
-    assert user_id.hex not in str(refused.value)
+    referenced = record_system_action_in_transaction(
+        session,
+        tenant_id=_TENANT,
+        actor=_ACTOR,
+        action="export.finished",
+        resource_type="export",
+        initiated_by=Initiator.from_caller(UserCaller(user_id)),
+    )
+    assert referenced.actor_user_id is None
+    _assert_reference_recorded(referenced)
+    assert subject_refs == [(_TENANT, user_id)]
 
     account_id = uuid.uuid4()
     entry = record_system_action_in_transaction(
@@ -758,22 +761,18 @@ def test_record_in_transaction_writes_a_system_callers_attribution_beside_its_pu
         resource_type="tenant",
     )
     assert plain.entry_metadata == {"system_authority": "tenant_purge"}
-    # Owner decision D2: a user initiator is refused before the insert,
-    # naming no id ...
-    operator = uuid.uuid4()
-    refused_session = MagicMock()
-    with pytest.raises(InvalidActorError, match="D2") as refused:
-        record_in_transaction(
-            refused_session,
+    # Phase P3: a user initiator is recorded as its tenant reference ...
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(audit_service, "audit_subject_ref", lambda session, **_: _D2_REF)
+        referenced = record_in_transaction(
+            MagicMock(),
             caller=SystemCaller(SystemAuthority.TENANT_PURGE),
             tenant_id=_TENANT,
             action="tenant.purge",
             resource_type="tenant",
-            initiated_by=Initiator.user(operator),
+            initiated_by=Initiator.user(_D2_USER),
         )
-    refused_session.add.assert_not_called()
-    refused_session.flush.assert_not_called()
-    assert str(operator) not in str(refused.value)
+    _assert_reference_recorded(referenced)
     # ... while a service-account initiator is still recorded beside the
     # purpose.
     account = uuid.uuid4()
@@ -842,29 +841,80 @@ def _assert_d2_refusal(error: InvalidActorError) -> None:
     assert str(_D2_USER) not in message and _D2_USER.hex not in message
 
 
+# Audit identity phase P3 (docs/architecture/AUDIT-IDENTITY-P3-PLAN.md): a
+# user initiator is no longer refused. Both tenant writers record it as the
+# user's tenant audit reference, never as the user id, and get or create the
+# reference only after every other check of the row has passed.
+_D2_REF = uuid.uuid4()
+_SYSTEM_CALLERS = {key: _D2_CALLERS[key] for key in ("system", "attributed-system")}
+_PRINCIPAL_CALLERS = {key: _D2_CALLERS[key] for key in ("user", "service-account")}
+
+
+@pytest.fixture
+def subject_refs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Replaces the tenant get-or-create; records `(tenant_id, user_id)`."""
+    calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+
+    def fake(session: object, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> uuid.UUID:
+        calls.append((tenant_id, user_id))
+        return _D2_REF
+
+    monkeypatch.setattr(audit_service, "audit_subject_ref", fake)
+    return calls
+
+
+def _assert_reference_recorded(entry: AuditLogEntry) -> None:
+    assert entry.entry_metadata is not None
+    assert entry.entry_metadata["initiated_by"] == {"type": "user", "subject_ref": str(_D2_REF)}
+    stored = json.dumps(entry.entry_metadata)
+    assert str(_D2_USER) not in stored and _D2_USER.hex not in stored
+
+
 @pytest.mark.parametrize("initiator", _D2_USER_INITIATORS.values(), ids=_D2_USER_INITIATORS)
-def test_record_system_action_refuses_a_user_initiator_and_writes_nothing(
-    initiator: Callable[[], Initiator | None],
+def test_record_system_action_records_a_user_initiator_as_its_reference(
+    initiator: Callable[[], Initiator | None], subject_refs: list[tuple[uuid.UUID, uuid.UUID]]
 ) -> None:
     session = MagicMock()
-    with pytest.raises(InvalidActorError) as refused:
-        record_system_action_in_transaction(
-            session,
-            tenant_id=_TENANT,
-            actor=_ACTOR,
-            action="export.finished",
-            resource_type="export",
-            initiated_by=initiator(),
-            correlation=SystemCorrelation(arq_job_id="arq-1"),
-        )
-    _assert_d2_refusal(refused.value)
-    assert session.mock_calls == []
+    entry = record_system_action_in_transaction(
+        session,
+        tenant_id=_TENANT,
+        actor=_ACTOR,
+        action="export.finished",
+        resource_type="export",
+        initiated_by=initiator(),
+        correlation=SystemCorrelation(arq_job_id="arq-1"),
+    )
+    assert subject_refs == [(_TENANT, _D2_USER)]
+    session.add.assert_called_once_with(entry)
+    _assert_reference_recorded(entry)
 
 
-@pytest.mark.parametrize("caller", _D2_CALLERS.values(), ids=_D2_CALLERS)
+@pytest.mark.parametrize("caller", _SYSTEM_CALLERS.values(), ids=_SYSTEM_CALLERS)
 @pytest.mark.parametrize("initiator", _D2_USER_INITIATORS.values(), ids=_D2_USER_INITIATORS)
-def test_record_in_transaction_refuses_a_user_initiator_and_writes_nothing(
-    caller: Callable[[], Caller], initiator: Callable[[], Initiator | None]
+def test_record_in_transaction_records_a_user_initiator_as_its_reference(
+    caller: Callable[[], Caller],
+    initiator: Callable[[], Initiator | None],
+    subject_refs: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    session = MagicMock()
+    entry = record_in_transaction(
+        session,
+        caller=caller(),
+        tenant_id=_TENANT,
+        action="tenant.purge",
+        resource_type="tenant",
+        initiated_by=initiator(),
+    )
+    assert subject_refs == [(_TENANT, _D2_USER)]
+    _assert_reference_recorded(entry)
+
+
+@pytest.mark.parametrize("caller", _PRINCIPAL_CALLERS.values(), ids=_PRINCIPAL_CALLERS)
+@pytest.mark.parametrize("initiator", _D2_USER_INITIATORS.values(), ids=_D2_USER_INITIATORS)
+def test_a_principal_caller_still_refuses_a_user_initiator_and_writes_nothing(
+    caller: Callable[[], Caller],
+    initiator: Callable[[], Initiator | None],
+    subject_refs: list[tuple[uuid.UUID, uuid.UUID]],
 ) -> None:
     session = MagicMock()
     with pytest.raises(InvalidActorError) as refused:
@@ -876,8 +926,82 @@ def test_record_in_transaction_refuses_a_user_initiator_and_writes_nothing(
             resource_type="tenant",
             initiated_by=initiator(),
         )
-    _assert_d2_refusal(refused.value)
+    assert str(_D2_USER) not in str(refused.value)
+    assert subject_refs == []
     assert session.mock_calls == []
+
+
+def test_a_user_initiator_gets_no_reference_when_the_row_is_refused(
+    subject_refs: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """Every check runs before any write: a row refused for another reason
+    (a forbidden metadata key) creates no reference."""
+    session = MagicMock()
+    with pytest.raises(ForbiddenMetadataKeyError):
+        record_system_action_in_transaction(
+            session,
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="export.finished",
+            resource_type="export",
+            metadata={"password": "x"},
+            initiated_by=Initiator.user(_D2_USER),
+        )
+    assert subject_refs == []
+    assert session.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"detail": {"initiated_by": {"type": "user", "subject_ref": str(_D2_USER)}}},
+        {"detail": [{"initiatedBy": {"type": "user", "subject_ref": str(_D2_REF)}}]},
+        {"detail": {"initiated_by": {"type": "user", "user_id": str(_D2_USER)}}},
+    ],
+    ids=["nested-user-id-as-reference", "nested-reference-spelling", "nested-raw-user-id"],
+)
+@pytest.mark.parametrize("typed", [None, "user"], ids=["no-initiator", "user-initiator"])
+def test_a_caller_supplied_user_shape_is_still_refused(
+    metadata: dict[str, object],
+    typed: str | None,
+    subject_refs: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """The reference shape is accepted only at the top level, with the
+    reference the writer just got: a caller who nests one -- above all one
+    holding a user id under `subject_ref` -- is refused, whether or not the
+    row also has a user initiator."""
+    session = MagicMock()
+    with pytest.raises(InvalidActorError):
+        record_system_action_in_transaction(
+            session,
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="export.finished",
+            resource_type="export",
+            metadata=metadata,
+            initiated_by=None if typed is None else Initiator.user(_D2_USER),
+        )
+    assert subject_refs == []
+    assert session.mock_calls == []
+
+
+def test_negative_control_the_top_level_shape_must_carry_the_writers_reference() -> None:
+    """`trusted_metadata()` itself: with the writer's reference, a top-level
+    user shape carrying any other value -- a user id above all -- is
+    refused, as is a shape with an extra field."""
+    for value in (
+        {"type": "user", "subject_ref": str(_D2_USER)},
+        {"type": "user", "subject_ref": str(_D2_REF), "user_id": str(_D2_USER)},
+        {"type": "user", "user_id": str(_D2_USER)},
+        "unavailable",
+    ):
+        with pytest.raises(InvalidActorError):
+            trusted_metadata({"initiated_by": value}, user_subject_ref=_D2_REF)
+    accepted = trusted_metadata(
+        {"a": 1, "initiated_by": {"type": "user", "subject_ref": str(_D2_REF)}, "b": 2},
+        user_subject_ref=_D2_REF,
+    )
+    assert list(accepted or {}) == ["a", "initiated_by", "b"]
 
 
 _D2_ACCEPTED: dict[str, tuple[Callable[[], Initiator | None], object]] = {
@@ -902,9 +1026,9 @@ _D2_ACCEPTED: dict[str, tuple[Callable[[], Initiator | None], object]] = {
 def test_non_user_initiators_and_none_are_still_recorded(
     initiator: Callable[[], Initiator | None], recorded: object
 ) -> None:
-    """D2 refuses the user type only: a service account (even one whose id
-    equals a user's), a system initiator and `None` (`"unavailable"`) are
-    written by both writers, as before."""
+    """A service account (even one whose id equals a user's), a system
+    initiator and `None` (`"unavailable"`) are written by both writers in
+    their own shapes, as before (a user initiator: its reference, above)."""
     session = MagicMock()
     entry = record_system_action_in_transaction(
         session,
@@ -930,8 +1054,8 @@ def test_non_user_initiators_and_none_are_still_recorded(
 
 
 def test_an_initiator_type_outside_the_allowlist_is_refused() -> None:
-    """The D2 gate is an allowlist: an initiator whose type is neither a
-    service account nor a system actor -- here a stand-in for a future
+    """The D2 gate is an allowlist: an initiator whose type is none of
+    user, service account and system actor -- here a stand-in for a future
     `InitiatorType`, forced past construction -- is refused by both
     writers before anything is written."""
     future = Initiator.service_account(_D2_USER)

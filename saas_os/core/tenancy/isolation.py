@@ -112,6 +112,11 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     ("control_plane.ai_budget_reservations", _T),
     ("control_plane.ai_usage_monthly", _T),
     ("core.audit_log", _T),
+    # Audit identity phase P3a (migration c7e3a9f2b4d8): a tenant's audit
+    # subject references, their erasure markers and legal holds.
+    ("core.audit_subject_links", _T),
+    ("core.audit_subject_erasures", _T),
+    ("core.audit_identity_holds", _T),
     ("core.billing_accounts", _T),
     ("core.billing_merchant_accounts", _T),
     ("core.billing_plan_offers", _T),

@@ -1,4 +1,4 @@
-"""Test support: empty the platform audit reference tables.
+"""Test support: empty the platform and tenant audit reference tables.
 
 Audit identity phase P1 (migration `e2b7c4d9a1f6`): every platform operation
 that targets a user writes a row to `core.platform_audit_subject_links`, and
@@ -35,6 +35,13 @@ _TABLES = (
     "core.platform_audit_subject_links",
     "core.platform_audit_subject_erasures",
     "core.platform_audit_identity_holds",
+    # Audit identity phase P3a (migration `c7e3a9f2b4d8`): the tenant tables.
+    # Their foreign keys onto `core.tenants` and `core.users` would otherwise
+    # block the tests that delete their tenants and users. TRUNCATE is not
+    # subject to row-level security.
+    "core.audit_subject_links",
+    "core.audit_subject_erasures",
+    "core.audit_identity_holds",
 )
 
 
@@ -74,6 +81,25 @@ def assert_disposable_database(url: str) -> None:
     )
 
 
+def resolve_tenant_reference(tenant_id: object, reference: object) -> str | None:
+    """Test support (audit identity phase P3a): the user id a tenant audit
+    reference is linked to, or `None` when it is unlinked or unknown. Reads
+    as the migrations role inside a transaction bound to `tenant_id`: the
+    tenant tables are under FORCE RLS, which binds the owner too. Read only."""
+    from sqlalchemy import text
+
+    with _engine().begin() as conn:
+        conn.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant_id)})
+        value = conn.execute(
+            text(
+                "SELECT user_id FROM core.audit_subject_links "
+                "WHERE tenant_id = CAST(:t AS uuid) AND subject_ref = CAST(:r AS uuid)"
+            ),
+            {"t": str(tenant_id), "r": str(reference)},
+        ).scalar()
+    return None if value is None else str(value)
+
+
 def clear_platform_audit_references() -> None:
     """Empty the three reference tables with the migrations role; a no-op
     when there is no database or the tables do not exist. Raises
@@ -87,9 +113,15 @@ def clear_platform_audit_references() -> None:
         from sqlalchemy import text
 
         with _engine().begin() as conn:
-            if conn.execute(
-                text("SELECT to_regclass('core.platform_audit_subject_links')")
-            ).scalar():
-                conn.execute(text("TRUNCATE " + ", ".join(_TABLES)))
+            # Never wait behind a lock a test still holds: give up instead.
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            # Only the tables present at the database's revision.
+            present = [
+                table
+                for table in _TABLES
+                if conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar()
+            ]
+            if present:
+                conn.execute(text("TRUNCATE " + ", ".join(present)))
     except Exception:  # noqa: BLE001 -- cleanup only; never fail a test
         return

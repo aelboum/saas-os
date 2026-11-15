@@ -34,6 +34,7 @@ from lifecycle_callers import PROVISIONING
 from saas_os.core.audit_log import (
     ActorType,
     AuditOutcome,
+    AuditSubjectLinkUnavailableError,
     InvalidActorError,
     ReservedMetadataKeyError,
     record,
@@ -290,10 +291,16 @@ def _scenarios(
         )
 
     return {
-        "tenant: typed argument, SystemCaller": (tenant_typed_system_caller, InvalidActorError),
+        # Audit identity phase P3: a typed user initiator is recorded as its
+        # tenant reference, which needs an existing user. The id here names
+        # no user, so the write fails closed with no reference and no row.
+        "tenant: typed argument, SystemCaller": (
+            tenant_typed_system_caller,
+            AuditSubjectLinkUnavailableError,
+        ),
         "tenant: typed argument from an outbox context": (
             tenant_typed_from_outbox_context,
-            InvalidActorError,
+            AuditSubjectLinkUnavailableError,
         ),
         "tenant: top-level metadata key (reserved)": (
             tenant_record({"initiated_by": shape}),

@@ -42,10 +42,18 @@ _LINK_TABLE_MODULES = {
     "saas_os/core/audit_identity/expiry.py": "the migrations-role expiry command (phase P2)",
     "saas_os/core/tenancy/isolation.py": "the isolation classification registry (data)",
     "saas_os/core/tenancy/retention.py": "the retention classification registry (data)",
+    # Audit identity phase P3a: the tenant tables (ADR-0063 option A).
+    "saas_os/core/audit_log/subject_models.py": "the tenant models themselves",
+    "saas_os/core/audit_log/subjects.py": "tenant get-or-create and the tenant erasure step",
 }
 _LINK_TABLE_NAME = re.compile(
     r"platform_audit_subject_links|platform_audit_subject_erasures|platform_audit_identity_holds"
     r"|PlatformAuditSubjectLink|PlatformAuditSubjectErasure|PlatformAuditIdentityHold"
+    # Audit identity phase P3a: the tenant tables and their models. The
+    # lookbehind leaves names such as `list_audit_identity_holds` alone.
+    r"|(?<![A-Za-z_])audit_subject_links|(?<![A-Za-z_])audit_subject_erasures"
+    r"|(?<![A-Za-z_])audit_identity_holds"
+    r"|TenantAuditSubjectLink|TenantAuditSubjectErasure|TenantAuditIdentityHold"
     r"|subject_models"
 )
 _MIGRATIONS = "saas_os/infra/db/migrations/"
@@ -99,6 +107,13 @@ def test_negative_control_a_module_importing_the_models_is_reported() -> None:
         "saas_os/core/other/lookup.py: names a link table or imports its models"
     ]
     sources["saas_os/core/other/lookup.py"] = 'TABLE = "core.platform_audit_subject_links"\n'
+    assert len(link_table_violations(sources)) == 1
+    # The tenant tables (phase P3a) are covered the same way.
+    sources["saas_os/core/other/lookup.py"] = 'TABLE = "core.audit_subject_links"\n'
+    assert len(link_table_violations(sources)) == 1
+    sources["saas_os/core/other/lookup.py"] = (
+        "from saas_os.core.audit_log.subject_models import TenantAuditSubjectLink\n"
+    )
     assert len(link_table_violations(sources)) == 1
 
 
@@ -253,10 +268,11 @@ def register_records_a_reference(sources: dict[str, str]) -> bool:
 def test_permission_grant_platform_writers_put_no_user_id_in_audit_metadata() -> None:
     sources = _sources()
     assert grant_metadata_user_id_findings(sources) == []
-    assert "operator_user_id" in sources["saas_os/core/permission_grants/apply.py"], (
-        "apply.py still writes tenant audit metadata with a raw id (P3): "
-        "update the ledger row in docs/P-ROADMAP.md if that changes"
-    )
+    # Audit identity phase P3a: apply.py records the operator as a tenant
+    # audit reference (ledger row of 2026-11-05, resolved).
+    apply = sources["saas_os/core/permission_grants/apply.py"]
+    assert '"operator_user_id"' not in apply
+    assert '"operator_user_subject_ref"' in apply and "audit_subject_ref(" in apply
 
 
 def test_the_register_records_a_subject_reference() -> None:
