@@ -1,6 +1,6 @@
 # Audit identity phase P3: implementation plan (tenant scope)
 
-**Status: Proposed plan for owner approval (2026-11-15).** Nothing in it is implemented. Approving it authorizes implementation only; publication (commit, push, PRs, merge, release) follows the usual rules, and you merge each PR that has code or a migration.
+**Status: Approved (owner, 2026-11-15: "Approve P3 plan"), with every recommendation of section 4 (Q1 to Q5) as written. Proposed the same day.** Nothing in it is implemented yet. Approving it authorizes implementation only; publication (commit, push, PRs, merge, release) follows the usual rules, and you merge each PR that has code or a migration.
 
 **Basis.**
 - The design: `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, sections 4.3 to 4.12 and section 8.
