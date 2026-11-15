@@ -149,9 +149,10 @@ from dataclasses import dataclass, field
 
 from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.audit_log.subjects import TenantSubjectErasure, erase_tenant_audit_subject
 from saas_os.core.authority import UserCaller
 from saas_os.core.identity.errors import UserNotFoundError
-from saas_os.core.identity.models import TenantMembership
+from saas_os.core.identity.models import TenantMembership, User
 from saas_os.core.identity.service import (
     delete_user_invitations_in_tenant,
     get_user,
@@ -169,6 +170,10 @@ _ACTION_INITIATORS_ERASED = "identity.erasure_outbox_initiators_erased"
 # count alone (never an address), written in the very transaction that
 # deletes the rows, whether or not a membership exists there.
 _ACTION_INVITATIONS_ERASED = "identity.erasure_invitations_erased"
+# Audit identity phase P3: a tenant where erasure unlinked (or kept under a
+# legal hold) the user's tenant audit references -- counts only, never a
+# reference -- written in the transaction that unlinks them.
+_ACTION_REFERENCES_ERASED = "identity.erasure_audit_references_unlinked"
 _RESOURCE_TYPE = "user"
 
 
@@ -199,6 +204,10 @@ class IdentityErasureResult:
     # only, never a reference.
     platform_references_unlinked: int = 0
     platform_references_kept_under_hold: int = 0
+    # Audit identity phase P3: the same two counts for the tenant audit
+    # references, summed over the tenants of the call.
+    tenant_references_unlinked: int = 0
+    tenant_references_kept_under_hold: int = 0
 
     @property
     def memberships_removed(self) -> int:
@@ -211,7 +220,7 @@ def _erase_membership_in_tenant(
     *,
     actor_user_id: uuid.UUID,
     invitation_addresses: frozenset[str] = frozenset(),
-) -> tuple[bool, int, int, int, int, int, int]:
+) -> tuple[bool, int, int, int, int, int, int, TenantSubjectErasure]:
     """One tenant's own share of `erase_user_identity()` -- mirrors
     `saas_os.core.tenancy.service._run_purge_pass()`'s own fixed, FK-safe order,
     scoped to one user's own rows: API keys and notifications (both carry
@@ -231,7 +240,9 @@ def _erase_membership_in_tenant(
     initiator was this user and is now `"unavailable"` (module docstring),
     `invitations_deleted` the tenant's invitations accepted by the user or
     addressed to one of `invitation_addresses` (already normalised) or to
-    the address of one the user accepted here, in every state.
+    the address of one the user accepted here, in every state, and last the
+    counts of the tenant audit references unlinked or kept under a hold
+    (audit identity phase P3, `erase_tenant_audit_subject`).
     """
     from saas_os.core.api_keys.service import purge_user_api_keys_in_tenant
     from saas_os.core.notifications.service import (
@@ -297,6 +308,31 @@ def _erase_membership_in_tenant(
                     resource_id=str(user_id),
                     metadata={"outbox_initiators_erased": outbox_initiators_erased},
                 )
+        # Audit identity phase P3 (proposal 4.6): last in this transaction,
+        # after its row locks, so the subject lock is the last lock taken
+        # (proposal 4.7). The user row `FOR KEY SHARE` first: an id that
+        # names no user changes nothing (the marker has a foreign key).
+        references = TenantSubjectErasure()
+        if (
+            session.execute(
+                select(User.id).where(User.id == user_id).with_for_update(read=True, key_share=True)
+            ).first()
+            is not None
+        ):
+            references = erase_tenant_audit_subject(session, tenant_id=tenant_id, user_id=user_id)
+        if references.links_unlinked or references.links_kept_under_hold:
+            record_in_transaction(
+                session,
+                caller=UserCaller(actor_user_id),
+                tenant_id=tenant_id,
+                action=_ACTION_REFERENCES_ERASED,
+                resource_type=_RESOURCE_TYPE,
+                resource_id=str(user_id),
+                metadata={
+                    "references_unlinked": references.links_unlinked,
+                    "references_kept_under_hold": references.links_kept_under_hold,
+                },
+            )
 
     if membership_id is not None:
         membership_roles_deleted = purge_user_membership_roles_in_tenant(tenant_id, membership_id)
@@ -348,6 +384,7 @@ def _erase_membership_in_tenant(
         notification_events_deleted,
         outbox_initiators_erased,
         invitations_deleted,
+        references,
     )
 
 
@@ -438,6 +475,8 @@ def erase_user_identity(
     total_notification_events = 0
     total_initiators_erased = 0
     total_invitations_deleted = 0
+    total_references_unlinked = 0
+    total_references_kept = 0
     checked: list[uuid.UUID] = []
     for tenant_id in tenant_ids:
         checked.append(tenant_id)
@@ -449,6 +488,7 @@ def erase_user_identity(
             notification_events_deleted,
             initiators_erased,
             invitations_deleted,
+            references,
         ) = _erase_membership_in_tenant(
             tenant_id,
             user_id,
@@ -463,6 +503,8 @@ def erase_user_identity(
         total_notification_events += notification_events_deleted
         total_initiators_erased += initiators_erased
         total_invitations_deleted += invitations_deleted
+        total_references_unlinked += references.links_unlinked
+        total_references_kept += references.links_kept_under_hold
 
     sessions_deleted = purge_user_sessions(user_id)
 
@@ -480,4 +522,6 @@ def erase_user_identity(
         invitations_deleted=total_invitations_deleted,
         platform_references_unlinked=link_removal.references_unlinked,
         platform_references_kept_under_hold=link_removal.references_kept_under_hold,
+        tenant_references_unlinked=total_references_unlinked,
+        tenant_references_kept_under_hold=total_references_kept,
     )

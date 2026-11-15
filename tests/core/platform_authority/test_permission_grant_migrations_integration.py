@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 import saas_os.core.permission_grants.apply as apply_module
+from audit_references import resolve_tenant_reference
 from saas_os.core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.permission_grants import (
     TENANT_CHANGED,
@@ -263,7 +264,12 @@ def test_apply_adds_only_the_missing_grants_with_ledger_tenant_and_platform_evid
     assert grant_row["resource_id"] == str(role)
     assert grant_row["metadata"]["system_authority"] == "permission_upgrade"
     assert grant_row["metadata"]["namespace"] == NS
-    assert grant_row["metadata"]["operator_user_id"] == str(operator.user_id)
+    # Audit identity phase P3a: the operator as this tenant's audit
+    # reference, never the raw id.
+    assert "operator_user_id" not in grant_row["metadata"]
+    operator_ref = grant_row["metadata"]["operator_user_subject_ref"]
+    assert operator_ref != str(operator.user_id)
+    assert resolve_tenant_reference(tenant, operator_ref) == str(operator.user_id)
     assert grant_row["metadata"]["run_id"] == str(result.run_id)
     assert grant_row["metadata"]["permission"] == f"{grants.resource}:export"
     (application,) = scene.tenant_audit(tenant, "permission_grant_migration.apply")
@@ -328,7 +334,7 @@ def test_a_migration_grant_is_audited_with_the_shape_of_an_ordinary_grant(
     assert set(migrated["metadata"]) - set(ordinary["metadata"]) == {
         "migration_id",
         "namespace",
-        "operator_user_id",
+        "operator_user_subject_ref",
         "run_id",
         "system_authority",
     }

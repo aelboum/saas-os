@@ -39,6 +39,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 import saas_os.api.outbox_dispatcher as outbox_dispatcher
 import saas_os.core.outbox.dispatch as dispatch
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from audit_references import resolve_tenant_reference
 from lifecycle_callers import PROVISIONING
 from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_once
 from saas_os.core.audit_log import AuditLogEntry, record_system_action_in_transaction
@@ -53,6 +54,7 @@ from saas_os.core.authority import (
     SystemCorrelation,
     UserCaller,
 )
+from saas_os.core.identity import get_or_create_user_for_external_identity
 from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -295,16 +297,19 @@ def _stored_payload(tenant_id: uuid.UUID, event_id: uuid.UUID) -> dict[str, obje
 # --- The initiating actor travels from producer to consumer --------------------------
 
 
-async def test_a_user_initiator_reaches_the_consumer_but_its_audit_write_is_refused(
+async def test_a_user_initiator_reaches_the_consumer_and_is_recorded_as_its_reference(
     tenants: _Tenants, consumer: _Consumer
 ) -> None:
-    """Owner decision D2: the outbox still carries a user initiator from the
-    producer to the consumer's context unchanged, but the audit writer
-    refuses it -- the attempt fails before any audit row is written, the
-    durable error names no user id, and the stored event keeps its
-    initiator (the outbox's own storage, which erasure rewrites)."""
+    """Audit identity phase P3 (owner decision D2, completed): the outbox
+    still carries a user initiator from the producer to the consumer's
+    context unchanged, and the audit writer now records it as the user's
+    tenant audit reference -- never the user id -- in the consumer's own
+    transaction. The stored event keeps its initiator (the outbox's own
+    storage, which erasure rewrites)."""
     tenant_id = tenants.new()
-    user_id = uuid.uuid4()
+    user_id = get_or_create_user_for_external_identity(
+        "https://issuer.example.test", f"attr-{uuid.uuid4().hex}"
+    ).id
     event_id = _append(
         tenant_id, Initiator.from_caller(UserCaller(user_id)), request_id="req-attr-1"
     )
@@ -322,16 +327,13 @@ async def test_a_user_initiator_reaches_the_consumer_but_its_audit_write_is_refu
     assert context.initiated_by is not None
     assert context.initiated_by.type == "user"
     assert context.initiated_by.user_id == str(user_id)
-    # ... and the audit writer refused it: no row, the attempt failed.
-    assert _audit_rows(tenant_id) == []
-    event = _event(tenant_id, event_id)
-    assert event.status == OUTBOX_STATUS_PENDING and event.attempts == 1
-    assert event.last_error is not None
-    assert event.last_error.startswith("InvalidActorError: ")
-    assert str(user_id) not in event.last_error
-    # Stored inside the existing payload column (no migration) under the
-    # reserved key; the producer's own keys are unchanged.
-    assert dict(event.payload) == {
+    # ... and the audit row records its tenant reference, never the id.
+    (row,) = _audit_rows(tenant_id)
+    initiated = _metadata(row)["initiated_by"]
+    assert set(initiated) == {"type", "subject_ref"} and initiated["type"] == "user"
+    assert initiated["subject_ref"] != str(user_id)
+    assert resolve_tenant_reference(tenant_id, initiated["subject_ref"]) == str(user_id)
+    assert _stored_payload(tenant_id, event_id) == {
         "n": 1,
         "saas_os.initiated_by": {"type": "user", "user_id": str(user_id)},
     }
@@ -389,14 +391,14 @@ async def test_the_three_roles_reach_the_consumers_audit_row(
     }
 
 
-async def test_a_consumer_passing_on_a_user_initiator_retries_then_dead_letters(
+async def test_a_user_initiator_naming_no_user_retries_then_dead_letters(
     tenants: _Tenants, consumer: _Consumer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The end-to-end consequence of D2 for a consumer written to the
-    pre-D2 guide (convert `context.initiated_by` and pass it on): every
-    attempt is refused the same way, so the event is retried and, after
-    `max_attempts`, dead-lettered -- without ever writing an audit row
-    that names the user."""
+    """Audit identity phase P3: a user initiator whose id names no user
+    cannot get a reference (the link's foreign key), so the audit write
+    fails closed on every attempt -- `AuditSubjectLinkUnavailableError`,
+    naming no id -- and the event retries and, after `max_attempts`, is
+    dead-lettered, without ever writing an audit row that names the id."""
     # The run job records each failure with the deployment's dispatch
     # configuration; make it this test's, as one deployment would have.
     monkeypatch.setattr(dispatch, "get_outbox_dispatch_config", lambda: _CONFIG)
@@ -415,7 +417,7 @@ async def test_a_consumer_passing_on_a_user_initiator_retries_then_dead_letters(
     assert final.status == OUTBOX_STATUS_DEAD_LETTERED
     assert final.attempts == _CONFIG.max_attempts
     assert final.last_error is not None
-    assert final.last_error.startswith("InvalidActorError: ")
+    assert final.last_error.startswith("AuditSubjectLinkUnavailableError: ")
     assert str(user_id) not in final.last_error
     assert _audit_rows(tenant_id) == []
 

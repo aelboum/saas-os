@@ -54,8 +54,10 @@ from saas_os.core.audit_log.metadata import (
     rebuilt_authority,
     rebuilt_uuid,
     trusted_metadata,
+    user_subject_initiator,
 )
 from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
+from saas_os.core.audit_log.subjects import audit_subject_ref
 from saas_os.core.authority import (
     INITIATOR_UNAVAILABLE,
     Caller,
@@ -106,10 +108,19 @@ _RESERVED_METADATA_KEYS = frozenset(
     {SYSTEM_ACTOR_METADATA_KEY, INITIATED_BY_METADATA_KEY, CORRELATION_METADATA_KEY}
 )
 # Owner decision D2 (2026-11-02): the initiator types a new audit record
-# may store under `initiated_by` -- an allowlist, so a user initiator (and
-# any future type) is refused before the insert. Defined once, in
-# `metadata.py`, for this typed check and the metadata check alike.
+# may store under `initiated_by` in their own recorded shape -- an
+# allowlist, so any future type is refused before the insert. Defined once,
+# in `metadata.py`, for this typed check and the metadata check alike.
 _AUDIT_INITIATOR_TYPES = AUDIT_INITIATOR_TYPES
+# Audit identity phase P3 (docs/architecture/AUDIT-IDENTITY-P3-PLAN.md): a
+# user initiator is accepted by the two in-transaction tenant writers and
+# recorded as the user's tenant audit reference, never as the user id.
+_TYPED_INITIATOR_TYPES = AUDIT_INITIATOR_TYPES | {InitiatorType.USER}
+# The reference the writers validate with before the real one exists: every
+# check runs before any write (`record()`'s contract), and a canonical UUID
+# string has the same length whatever its value, so the size bound checked
+# with it holds for the stored row.
+_PLACEHOLDER_SUBJECT_REF = uuid.UUID(int=0)
 # The key under which a `SystemCaller`'s purpose is recorded (ADR-0031).
 _SYSTEM_AUTHORITY_METADATA_KEY = "system_authority"
 # `record_system_action_in_transaction()` authorizes nothing, so a row it
@@ -140,6 +151,8 @@ def _attribution(
     actor: SystemActor | None,
     initiated_by: Initiator | None,
     correlation: SystemCorrelation | None,
+    *,
+    user_subject_ref: uuid.UUID | None = None,
 ) -> dict[str, object]:
     """The three attribution roles in their fixed shapes (owner decision C):
     `system_actor` -- the executing component (only when known);
@@ -155,9 +168,16 @@ def _attribution(
     value: dict[str, object] = {}
     if actor is not None:
         value[SYSTEM_ACTOR_METADATA_KEY] = _rebuilt_actor(actor, "actor").as_metadata()
-    value[INITIATED_BY_METADATA_KEY] = (
-        INITIATOR_UNAVAILABLE if initiator is None else initiator.as_metadata()
-    )
+    if initiator is None:
+        value[INITIATED_BY_METADATA_KEY] = INITIATOR_UNAVAILABLE
+    elif initiator.type is InitiatorType.USER:
+        # Phase P3: the reference, never the user id. `user_subject_ref` is
+        # the placeholder while validating and the real reference after.
+        if user_subject_ref is None:
+            raise InvalidActorError("a user initiator needs its audit subject reference.")
+        value[INITIATED_BY_METADATA_KEY] = user_subject_initiator(user_subject_ref)
+    else:
+        value[INITIATED_BY_METADATA_KEY] = initiator.as_metadata()
     value[CORRELATION_METADATA_KEY] = (
         {} if rebuilt_correlation is None else rebuilt_correlation.as_metadata()
     )
@@ -168,12 +188,12 @@ def _require_attribution_types(
     initiated_by: object, correlation: object
 ) -> tuple[Initiator | None, SystemCorrelation | None]:
     """Fail closed, before any write, on an attribution argument of the
-    wrong type -- and, under owner decision D2 (2026-11-02), on a user
-    initiator: a new audit record never stores a raw user id under
-    `initiated_by`. An allowlist, so a future initiator type fails closed:
-    only service-account and system initiators, and `None` (recorded as
-    `"unavailable"`), are accepted. The refusal names no id. Returns the
-    initiator and the correlation rebuilt from their fields
+    wrong type. An allowlist, so a future initiator type fails closed: user,
+    service-account and system initiators, and `None` (recorded as
+    `"unavailable"`), are accepted. A user initiator is accepted only because
+    the writers record it as a tenant audit reference (audit identity phase
+    P3), never as the user id (owner decision D2). The refusal names no id.
+    Returns the initiator and the correlation rebuilt from their fields
     (`_rebuilt_initiator`, `_rebuilt_correlation`), which is what gets
     recorded."""
     if initiated_by is not None and type(initiated_by) is not Initiator:
@@ -181,12 +201,8 @@ def _require_attribution_types(
             f"initiated_by must be an Initiator, got {type(initiated_by).__name__}."
         )
     initiator = None if initiated_by is None else _rebuilt_initiator(initiated_by)
-    if initiator is not None and initiator.type not in _AUDIT_INITIATOR_TYPES:
-        raise InvalidActorError(
-            "initiated_by must be a service-account or system initiator: new audit "
-            "records do not store a user id as the initiator (owner decision D2). "
-            "Pass None to record it as unavailable."
-        )
+    if initiator is not None and initiator.type not in _TYPED_INITIATOR_TYPES:
+        raise InvalidActorError("initiated_by must be a user, service-account or system initiator.")
     if correlation is not None and type(correlation) is not SystemCorrelation:
         raise InvalidActorError(
             f"correlation must be a SystemCorrelation, got {type(correlation).__name__}."
@@ -491,20 +507,31 @@ def record_in_transaction(
     initiator, so passing either for one fails closed
     (`InvalidActorError`) before the insert.
 
-    A user `Initiator` (`InitiatorType.USER`) is refused with
-    `InvalidActorError` before the insert, for every caller (owner decision
-    D2, 2026-11-02): a new audit record never stores a raw user id under
-    `initiated_by`. A user-initiated system action is recorded with
-    `initiated_by=None` (`"unavailable"`) until the reference mechanism
-    ships. (A `UserCaller`'s own id in `actor_user_id` is unaffected: the
-    database requires it for a user row.)
+    A user `Initiator` (`InitiatorType.USER`) is recorded as the user's
+    **tenant audit reference** for the day, `{"type": "user", "subject_ref":
+    "<reference>"}`, never as the user id (owner decisions D1 and D2; audit
+    identity phase P3, docs/architecture/AUDIT-IDENTITY-P3-PLAN.md). The
+    reference is got or created in `session`'s transaction
+    (`saas_os.core.audit_log.subjects.audit_subject_ref`) after every other
+    check has passed, so `session` must run at READ COMMITTED; an erased user
+    gets a reference that names nobody, and a failure raises
+    `AuditSubjectLinkUnavailableError` (no fallback to the id). (A
+    `UserCaller`'s own id in `actor_user_id` is unaffected: the database
+    requires it for a user row, owner decision O1.)
     """
     require_caller("record_in_transaction", caller)
     _refuse_reserved_metadata(metadata)
-    _require_attribution_types(initiated_by, correlation)
+    initiator, _ = _require_attribution_types(initiated_by, correlation)
+    subject_user = _user_subject(initiator)
+    placeholder = None if subject_user is None else _PLACEHOLDER_SUBJECT_REF
     if isinstance(caller, SystemCaller):
         if caller.actor is not None or initiated_by is not None or correlation is not None:
-            metadata = {**(metadata or {}), **_attribution(caller.actor, initiated_by, correlation)}
+            metadata = {
+                **(metadata or {}),
+                **_attribution(
+                    caller.actor, initiated_by, correlation, user_subject_ref=placeholder
+                ),
+            }
     elif initiated_by is not None or correlation is not None:
         raise InvalidActorError(
             "initiated_by and correlation apply only to a SystemCaller; a user or "
@@ -525,10 +552,37 @@ def record_in_transaction(
         acting_as_tenant_id=acting_as_tenant_id,
         delegation_grant_id=delegation_grant_id,
         support_access_id=support_access_id,
+        user_subject_ref=placeholder,
     )
+    _record_user_subject(session, entry, tenant_id=tenant_id, user_id=subject_user)
     session.add(entry)
     session.flush()
     return entry
+
+
+def _user_subject(initiator: Initiator | None) -> uuid.UUID | None:
+    """The user id of a user initiator (to be replaced by its reference),
+    or `None`."""
+    if initiator is None or initiator.type is not InitiatorType.USER:
+        return None
+    if initiator.principal_id is None:  # excluded by Initiator's own construction rule
+        raise InvalidActorError("a user initiator names no user.")
+    return initiator.principal_id
+
+
+def _record_user_subject(
+    session: Session, entry: AuditLogEntry, *, tenant_id: uuid.UUID, user_id: uuid.UUID | None
+) -> None:
+    """Phase P3: get or create the user's tenant audit reference -- only
+    now, after every check of the row has passed -- and put it in place of
+    the placeholder the checks ran with. The two canonical UUID strings have
+    the same length, so the size bound still holds."""
+    if user_id is None:
+        return
+    reference = audit_subject_ref(session, tenant_id=tenant_id, user_id=user_id)
+    stored = dict(entry.entry_metadata or {})
+    stored[INITIATED_BY_METADATA_KEY] = user_subject_initiator(reference)
+    entry.entry_metadata = stored
 
 
 def _caller_actor(
@@ -593,16 +647,17 @@ def record_system_action_in_transaction(
     id and request id (`metadata["correlation"]`, only the parts present,
     `{}` when `None`). In a job, `SystemActor.from_job_actor(context.
     system_actor)`, `Initiator.from_job_initiator(context.initiated_by)` and
-    `SystemCorrelation.from_job_context(context)` give the three -- except
-    that a user initiator is refused (below).
+    `SystemCorrelation.from_job_context(context)` give the three; a user
+    initiator is recorded as the user's tenant audit reference (below).
 
     Fails closed before the insert: `actor` must be a `SystemActor`,
     `initiated_by` a service-account or system `Initiator` or `None`,
     `correlation` a `SystemCorrelation` or `None` (`InvalidActorError`
-    otherwise). A user `Initiator` is refused (owner decision D2,
-    2026-11-02: a new audit record never stores a raw user id under
-    `initiated_by`); in an outbox consumer whose `context.initiated_by` is
-    a user, pass `initiated_by=None`, which records `"unavailable"`.
+    otherwise). A user `Initiator` is recorded as
+    `{"type": "user", "subject_ref": "<reference>"}`, the user's tenant audit
+    reference got or created in `session`'s transaction after every other
+    check (audit identity phase P3; owner decision D2: never the user id), as
+    in `record_in_transaction()`.
     Further, caller-supplied `metadata` must not carry a reserved key
     (`system_actor`, `initiated_by`, `correlation`, and -- for this
     function, which authorizes nothing -- `system_authority`;
@@ -614,7 +669,10 @@ def record_system_action_in_transaction(
     if type(actor) is not SystemActor:
         raise InvalidActorError(f"actor must be a SystemActor, got {type(actor).__name__}.")
     _refuse_reserved_metadata(metadata, _SYSTEM_ACTION_RESERVED_METADATA_KEYS)
-    attribution = _attribution(actor, initiated_by, correlation)
+    initiator, _ = _require_attribution_types(initiated_by, correlation)
+    subject_user = _user_subject(initiator)
+    placeholder = None if subject_user is None else _PLACEHOLDER_SUBJECT_REF
+    attribution = _attribution(actor, initiated_by, correlation, user_subject_ref=placeholder)
     entry = _validated_entry(
         tenant_id=tenant_id,
         actor_type=ActorType.SYSTEM,
@@ -629,7 +687,9 @@ def record_system_action_in_transaction(
         acting_as_tenant_id=None,
         delegation_grant_id=None,
         support_access_id=None,
+        user_subject_ref=placeholder,
     )
+    _record_user_subject(session, entry, tenant_id=tenant_id, user_id=subject_user)
     session.add(entry)
     session.flush()
     return entry
@@ -650,9 +710,12 @@ def _validated_entry(
     acting_as_tenant_id: uuid.UUID | None,
     delegation_grant_id: uuid.UUID | None,
     support_access_id: uuid.UUID | None,
+    user_subject_ref: uuid.UUID | None = None,
 ) -> AuditLogEntry:
     """Validate every argument (fail closed, before any write) and build
-    the unsaved entry -- shared by `record()` and `record_in_transaction()`."""
+    the unsaved entry -- shared by `record()` and `record_in_transaction()`.
+    `user_subject_ref` is the reference a user initiator's `initiated_by`
+    value must carry (phase P3; `trusted_metadata()`)."""
     if actor_type is ActorType.USER:
         if actor_user_id is None:
             raise InvalidActorError("actor_user_id is required when actor_type is ActorType.USER.")
@@ -694,7 +757,7 @@ def _validated_entry(
     # caller's own metadata -- holds no user initiator; and (final closure,
     # 2026-11-03) what is stored is a plain copy in which every
     # `initiated_by`, `correlation` and `system_actor` value is rebuilt.
-    metadata = trusted_metadata(metadata)
+    metadata = trusted_metadata(metadata, user_subject_ref=user_subject_ref)
 
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
         raise InvalidActionOrResourceError(

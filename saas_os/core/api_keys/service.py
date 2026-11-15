@@ -90,6 +90,7 @@ from saas_os.core.api_keys.errors import (
 from saas_os.core.api_keys.models import ApiKey
 from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.audit_log.subjects import audit_subject_ref
 from saas_os.core.authority import Caller, ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.identity import (
     ServiceAccountStatus,
@@ -851,12 +852,19 @@ def record_platform_key_revocations(
     """One `api_key.revoke` row per revoked key, in that key's own
     tenant's `core.audit_log`, naming the platform operator as the actor
     (ADR-0045 section 8, dual evidence): the tenant's administrators see in
-    their own trail who revoked the key. Same metadata shape
-    `revoke_api_key()` writes, plus a marker that the platform acted. Each
-    row is written under its tenant's row-level-security scope; call this
-    after the platform audit row, never inside another bind block."""
+    their own trail who revoked the key, plus a marker that the platform
+    acted. The key's owner -- the platform operation's target user -- is
+    recorded as that tenant's audit reference under `owner_user_subject_ref`,
+    never as `owner_user_id` (owner decision OD-3; audit identity phase P3,
+    docs/architecture/AUDIT-IDENTITY-P3-PLAN.md): the reference is got or
+    created in the same transaction and tenant scope as the row. Revocations
+    by a tenant administrator (`revoke_api_key()`) keep `owner_user_id`
+    (phase P4). Each row is written under its tenant's row-level-security
+    scope; call this after the platform audit row, never inside another bind
+    block."""
     for key_id, tenant_id in keys:
         with bind_tenant_scope(session, tenant_id):
+            owner_ref = audit_subject_ref(session, tenant_id=tenant_id, user_id=user_id)
             record_in_transaction(
                 session,
                 caller=caller,
@@ -864,7 +872,7 @@ def record_platform_key_revocations(
                 action="api_key.revoke",
                 resource_type="api_key",
                 resource_id=str(key_id),
-                metadata={"owner_user_id": str(user_id), "platform": True},
+                metadata={"owner_user_subject_ref": str(owner_ref), "platform": True},
             )
 
 

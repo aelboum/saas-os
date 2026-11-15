@@ -87,3 +87,13 @@ class AuditLogEntryNotFoundError(LookupError):
         self.tenant_id = tenant_id
         self.entry_id = entry_id
         super().__init__(f"Audit log entry {entry_id} not found in tenant {tenant_id}.")
+
+
+class AuditSubjectLinkUnavailableError(RuntimeError):
+    """A tenant audit subject reference could not be got or created
+    (`saas_os.core.audit_log.subjects`): the transaction does not run at READ
+    COMMITTED, the audited user or tenant does not exist, three consecutive
+    reference collisions, or the link that another transaction committed
+    could not be read back. There is no fallback to the raw user id. The
+    message names no user. Not an `InvalidAuditRecordError`: the arguments
+    were valid, the reference was not available."""

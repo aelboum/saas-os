@@ -74,6 +74,11 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
     {
         # --- retained evidence ------------------------------------------------
         "core.audit_log": RetentionClass.SECURITY_RETAIN,
+        # Audit identity phase P3a: they leave only through the expiry
+        # command, never through tenant purge.
+        "core.audit_subject_links": RetentionClass.SECURITY_RETAIN,
+        "core.audit_subject_erasures": RetentionClass.SECURITY_RETAIN,
+        "core.audit_identity_holds": RetentionClass.SECURITY_RETAIN,
         "core.support_access_requests": RetentionClass.SECURITY_RETAIN,
         # ADR-0045: platform authority and platform evidence. Global, not
         # tenant-owned (no `tenant_id` column), so the audit below does not

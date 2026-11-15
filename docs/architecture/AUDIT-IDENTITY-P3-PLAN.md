@@ -2,6 +2,11 @@
 
 **Status: Approved (owner, 2026-11-15: "Approve P3 plan"), with every recommendation of section 4 (Q1 to Q5) as written. Proposed the same day.** Nothing in it is implemented yet. Approving it authorizes implementation only; publication (commit, push, PRs, merge, release) follows the usual rules, and you merge each PR that has code or a migration.
 
+**Implementation status (2026-11-15).** P3a is implemented on branch `feat/audit-identity-p3a`, not merged: migration M1 (`c7e3a9f2b4d8`), tenant get-or-create (`saas_os.core.audit_log.subjects`), the writer changes (D2 lift, OD-3) and the tenant erasure step. Two findings from P3a:
+
+- **Added to P3a's scope:** `saas_os/core/permission_grants/apply.py` recorded the operator's raw id (`operator_user_id`) in tenant audit rows. The deferred-issue ledger assigned it to P3 ("key to be decided with the tenant tables"), and this plan missed it. P3a records `operator_user_subject_ref` instead.
+- **For P3c:** the P2 hold-evidence trigger cannot be copied as it is to the tenant hold table. A tenant hold is written in a tenant-bound transaction, where `core.platform_audit_log` is invisible (the tenant-context exclusion policy, ADR-0045 section 9b), so a trigger there cannot see the platform audit row that placed the hold. P3c must choose another evidence design, for example the tenant audit row written in the same transaction. M1 therefore creates the tenant hold table without an evidence trigger; nothing writes it until P3c.
+
 **Basis.**
 - The design: `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, sections 4.3 to 4.12 and section 8.
 - The decisions: `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` (D1 to D8, O1 to O11, OD-1 to OD-3).

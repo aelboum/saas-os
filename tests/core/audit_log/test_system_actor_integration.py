@@ -36,6 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
 import saas_os.core
+from audit_references import resolve_tenant_reference
 from lifecycle_callers import PROVISIONING
 from saas_os.core.audit_digest import (
     LoggedRecord,
@@ -48,7 +49,7 @@ from saas_os.core.audit_log import (
     ActorType,
     AuditLogEntry,
     AuditOutcome,
-    InvalidActorError,
+    AuditSubjectLinkUnavailableError,
     get,
     record,
     record_in_transaction,
@@ -64,6 +65,7 @@ from saas_os.core.authority import (
     SystemCorrelation,
 )
 from saas_os.core.billing.errors import BillingActorRequiredError
+from saas_os.core.identity import get_or_create_user_for_external_identity
 from saas_os.core.platform_authority import PlatformNotAuthorizedError
 from saas_os.core.platform_authority.operations import (
     PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY,
@@ -179,10 +181,12 @@ def test_the_actor_is_committed_with_the_callers_transaction(
         "correlation": {"arq_job_id": "job-1", "request_id": "corr-sa-1"},
     }
 
-    # Owner decision D2 (2026-11-02): a user initiator is refused before
-    # the insert, by both writers, and the caller's transaction commits
-    # nothing of it -- not even the mutation it was meant to describe.
-    user_id = uuid.uuid4()
+    # Audit identity phase P3 (owner decision D2, completed): a user
+    # initiator is recorded by both writers as the user's tenant audit
+    # reference, never the id, and the reference commits with the row.
+    user_id = get_or_create_user_for_external_identity(
+        "https://issuer.example.test", f"sa-{uuid.uuid4().hex}"
+    ).id
     for action, write in (
         (
             "test.system_actor.d2_system_action",
@@ -207,21 +211,41 @@ def test_the_actor_is_committed_with_the_callers_transaction(
             ),
         ),
     ):
-        with pytest.raises(InvalidActorError) as refused, tenant_session_scope(tenant) as session:
-            record_system_action_in_transaction(
-                session,
-                tenant_id=tenant,
-                actor=_ACTOR,
-                action=f"{action}.change",
-                resource_type="export",
-            )
+        with tenant_session_scope(tenant) as session:
             write(session, action)
-        assert str(user_id) not in str(refused.value)
-        assert _rows(tenant, action) == []
-        assert _rows(tenant, f"{action}.change") == []
+        (row,) = _rows(tenant, action)
+        initiated = row.entry_metadata["initiated_by"]  # type: ignore[index]
+        assert initiated["type"] == "user" and set(initiated) == {"type", "subject_ref"}
+        assert resolve_tenant_reference(tenant, initiated["subject_ref"]) == str(user_id)
     assert _admin(
         "SELECT count(*) FROM core.audit_log WHERE metadata::text LIKE :u", u=f"%{user_id}%"
     ) == [(0,)]
+
+    # A user id that names no user gets no reference: the write fails closed
+    # and the caller's transaction commits nothing, not even its change.
+    unknown = uuid.uuid4()
+    with (
+        pytest.raises(AuditSubjectLinkUnavailableError) as refused,
+        tenant_session_scope(tenant) as session,
+    ):
+        record_system_action_in_transaction(
+            session,
+            tenant_id=tenant,
+            actor=_ACTOR,
+            action="test.system_actor.d2_unknown.change",
+            resource_type="export",
+        )
+        record_system_action_in_transaction(
+            session,
+            tenant_id=tenant,
+            actor=_ACTOR,
+            action="test.system_actor.d2_unknown",
+            resource_type="export",
+            initiated_by=Initiator.user(unknown),
+        )
+    assert str(unknown) not in str(refused.value)
+    assert _rows(tenant, "test.system_actor.d2_unknown") == []
+    assert _rows(tenant, "test.system_actor.d2_unknown.change") == []
 
 
 def test_the_actor_is_rolled_back_with_the_callers_transaction(

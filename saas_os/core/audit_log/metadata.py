@@ -344,9 +344,34 @@ def _rebuild_attribution(value: object) -> object:
     return value
 
 
-def trusted_metadata(metadata: dict[str, object] | None) -> dict[str, object] | None:
+USER_SUBJECT_REF_FIELD = "subject_ref"
+
+
+def user_subject_initiator(reference: uuid.UUID) -> dict[str, object]:
+    """The recorded `initiated_by` shape of a user initiator in a tenant
+    audit row once audit identity phase P3 ships: the user's tenant audit
+    reference, never the user id (owner decisions D1 and D2;
+    docs/architecture/AUDIT-IDENTITY-P3-PLAN.md). Only the tenant audit
+    writers build it, from a reference they have just got or created."""
+    return {"type": InitiatorType.USER.value, USER_SUBJECT_REF_FIELD: str(rebuilt_uuid(reference))}
+
+
+def trusted_metadata(
+    metadata: dict[str, object] | None, *, user_subject_ref: uuid.UUID | None = None
+) -> dict[str, object] | None:
     """What an audit writer stores for `metadata` (owner decision of
     2026-11-03, final closure): never the caller's own objects.
+
+    `user_subject_ref` (audit identity phase P3, tenant writers only): the
+    reference the writer has got or created for a user initiator. The
+    top-level `initiated_by` value must then be exactly
+    `user_subject_initiator(user_subject_ref)` (`InvalidActorError`
+    otherwise); it is the one place a user shape is accepted, and only with
+    that exact reference. Everything else in `metadata` -- every other key,
+    at any depth, under any spelling -- goes through the checks below
+    unchanged, so a user shape anywhere else, a caller-chosen reference, or
+    a user id placed under `subject_ref` is still refused. The size bound
+    and the denylist apply to the whole stored value.
 
     1. the attribution checks of step 3 on the caller's own objects (so a
        user initiator, or an identity-carrying correlation, is refused as
@@ -368,6 +393,8 @@ def trusted_metadata(metadata: dict[str, object] | None) -> dict[str, object] | 
     Metadata made only of plain JSON values, whose attribution values are
     already in their recorded shapes, is stored equal to the input and
     serializes to the same bytes."""
+    if user_subject_ref is not None:
+        return _with_user_subject(metadata, user_subject_ref)
     if metadata is None:
         return None
     _check_attribution_values(metadata, frozenset(_REBUILDERS))
@@ -379,6 +406,32 @@ def trusted_metadata(metadata: dict[str, object] | None) -> dict[str, object] | 
         raise MetadataNotJSONSerializableError() from error
     validate_metadata(rebuilt)
     return rebuilt
+
+
+def _with_user_subject(
+    metadata: dict[str, object] | None, reference: uuid.UUID
+) -> dict[str, object]:
+    """`trusted_metadata()` for a row whose initiator is a user: the exact
+    top-level `initiated_by` value is set aside, the rest is checked and
+    rebuilt as for any other row, and the value is put back in its place."""
+    expected = user_subject_initiator(reference)
+    if type(metadata) is not dict or INITIATED_BY_KEY not in metadata:
+        raise InvalidActorError(_USER_INITIATOR_IN_METADATA)
+    value = metadata[INITIATED_BY_KEY]
+    if (
+        type(value) is not dict
+        or not _plain_strings(value)
+        or set(value) != set(expected)
+        or value != expected
+    ):
+        raise InvalidActorError(_USER_INITIATOR_IN_METADATA)
+    position = list(metadata).index(INITIATED_BY_KEY)
+    rest = {key: nested for key, nested in metadata.items() if key != INITIATED_BY_KEY}
+    items = list((trusted_metadata(rest) or {}).items())
+    items.insert(min(position, len(items)), (INITIATED_BY_KEY, dict(expected)))
+    stored = dict(items)
+    validate_metadata(stored)
+    return stored
 
 
 def validate_metadata(metadata: dict[str, object] | None) -> None:

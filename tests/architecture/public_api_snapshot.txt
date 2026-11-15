@@ -299,6 +299,7 @@ saas_os.core.audit_log.ActorType = {"class": "class ActorType(enum.StrEnum)"}
 saas_os.core.audit_log.AuditLogEntry = {"class": "class AuditLogEntry(Base, UUIDPrimaryKeyMixin)", "fields": ["acting_as_tenant_id", "action", "actor_service_account_id", "actor_type", "actor_user_id", "correlation_id", "created_at", "delegation_grant_id", "entry_metadata", "outcome", "resource_id", "resource_type", "support_access_id", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.audit_log.AuditLogEntryNotFoundError = {"class": "class AuditLogEntryNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, entry_id: uuid.UUID) -> None"}}
 saas_os.core.audit_log.AuditOutcome = {"class": "class AuditOutcome(enum.StrEnum)"}
+saas_os.core.audit_log.AuditSubjectLinkUnavailableError = {"class": "class AuditSubjectLinkUnavailableError(RuntimeError)"}
 saas_os.core.audit_log.ForbiddenMetadataKeyError = {"class": "class ForbiddenMetadataKeyError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
 saas_os.core.audit_log.InvalidActionOrResourceError = {"class": "class InvalidActionOrResourceError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
 saas_os.core.audit_log.InvalidActorError = {"class": "class InvalidActorError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}

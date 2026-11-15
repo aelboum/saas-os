@@ -19,6 +19,7 @@ from phase_c_helpers import BILLING, PROVISIONING, REASON, TENANT_PURGE, P, Scen
 from platform_helpers import BOOTSTRAP, PlatformWorld
 
 import saas_os.core.identity.user_authority as user_authority
+from audit_references import resolve_tenant_reference
 from saas_os.core.api_keys import (
     RevokedApiKeyError,
     create_api_key,
@@ -246,9 +247,17 @@ def test_revoking_api_keys_revokes_every_user_owned_key_in_every_tenant(
             if row["actor_user_id"] == holder.user_id
         ]
         assert {uuid.UUID(row["resource_id"]) for row in own} == expected
-        assert all(
-            row["metadata"] == {"owner_user_id": str(user_id), "platform": True} for row in own
-        )
+        # OD-3 (audit identity phase P3a): the key owner is the tenant's
+        # audit reference, never the raw id, and it resolves to the user
+        # inside that tenant only.
+        for row in own:
+            assert set(row["metadata"]) == {"owner_user_subject_ref", "platform"}
+            assert row["metadata"]["platform"] is True
+            reference = row["metadata"]["owner_user_subject_ref"]
+            assert reference != str(user_id) and str(user_id) not in str(row["metadata"])
+            assert resolve_tenant_reference(tenant, reference) == str(user_id)
+            other = tenant_b if tenant == tenant_a else tenant_a
+            assert resolve_tenant_reference(other, reference) is None
 
     # Idempotent: nothing left to revoke; still authorized and recorded.
     assert revoke_user_api_keys(user_id, caller=holder, reason=REASON) == 0
