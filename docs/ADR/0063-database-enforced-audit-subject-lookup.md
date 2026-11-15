@@ -1,8 +1,8 @@
 # ADR-0063: Database-enforced restrictions on audit subject lookup
 
-Status: Proposed (2026-11-15). Prepared under owner decision O11 of 2026-11-03, which requires this evaluation before phase P3 of the audit identity mechanism starts. Nothing is implemented. The owner decides.
+Status: Accepted (2026-11-15, owner): option A for phase P3. Proposed the same day under owner decision O11 of 2026-11-03; the evaluation below is kept as written, and its recommendation (option B) was not taken.
 Date: 2026-11-15
-Supersedes / Superseded by: none. If option B is accepted, this ADR narrowly amends ADR-0030 ("no `SECURITY DEFINER` function exists in a SaaS-OS schema") for the named functions only, and adds a database identity on the ADR-0056 pattern.
+Supersedes / Superseded by: none. Option A amends no ADR: ADR-0030's no-`SECURITY DEFINER` rule and ADR-0045 section 9a's single application principal stay as they are (*was:* "If option B is accepted, this ADR narrowly amends ADR-0030 for the named functions only, and adds a database identity on the ADR-0056 pattern").
 Related: ADR-0002 (tenant isolation), ADR-0030 (RLS sweep; no `SECURITY DEFINER`), ADR-0031 (same-transaction audit; return only after commit), ADR-0045 (platform authority; sections 9a and 9b), ADR-0053 (audit digests), ADR-0056 (a dedicated database identity), `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md` (sections 4.3 to 4.10), `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` (O11), `docs/architecture/AUDIT-RAW-IDENTITY-INVENTORY.md`.
 
 ## Context
@@ -177,7 +177,18 @@ If the owner prefers to keep P3 smaller, the fallback is **option A for P3**, wi
 
 ## Decision
 
-Pending (owner).
+**Option A for P3 (owner, 2026-11-15).** The owner's answer to "pick option B or A for ADR-0063" was "A".
+
+What this decides:
+
+- P3's tenant link tables get the same grants as the platform tables (proposal, section 4.3): the application role keeps `SELECT`, `INSERT` and `UPDATE (user_id, unlinked_at, unlink_reason)`, with no `DELETE`. No `SECURITY DEFINER` function and no lookup role are added.
+- P3 must ship the option A tests of section 9: the architecture test extended to the tenant tables with its negative control, a privilege test that pins the grants on all six tables, and the cross-tenant RLS tests with both negative controls.
+- The residual, unaudited resolution of live references by any holder of the application credential, is recorded in the deferred-issue ledger (`docs/P-ROADMAP.md`) as LOW now and MEDIUM once P3 removes the raw tenant `initiated_by` ids.
+
+What this does not decide:
+
+- Whether option B is built later, and when. The fallback text above suggested making B its own phase before `--apply` (O9) is enabled; that remains a recommendation, recorded in the ledger row, not a decision.
+- O11's interim character. Option A was accepted "temporarily" on 2026-11-03; this decision makes it the design for P3 as well. Reopening it needs a new owner decision, with this ADR's evaluation as the starting point.
 
 ## What Would Be Difficult to Change Later
 

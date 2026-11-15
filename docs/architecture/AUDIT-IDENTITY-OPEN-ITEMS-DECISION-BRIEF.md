@@ -202,7 +202,7 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
   8. The amendment to the current no-`SECURITY DEFINER` stance that option B would need.
   9. The tests that would prove the chosen option: privilege tests, with negative controls.
 - **Evidence and tests.** For the interim design: the architecture test and its negative control. For the gate: the ADR exists and was prepared before any P3 work started. A reviewer checks this at P3's approval.
-- **Prepared (2026-11-15):** [ADR-0063](../ADR/0063-database-enforced-audit-subject-lookup.md), Proposed; it evaluates the nine items above and recommends option B (definer get-or-create and erasure, plus a lookup role), with option A for P3 as the fallback. The owner decides before P3 starts.
+- **Prepared and decided (2026-11-15):** [ADR-0063](../ADR/0063-database-enforced-audit-subject-lookup.md) evaluates the nine items above. It recommended option B (definer get-or-create and erasure, plus a lookup role); the owner chose **option A for P3** on 2026-11-15. The gate is satisfied; P3 still needs its own approval.
 
 ## O3, O5, O6 and O7 (decided 2026-11-03, merge preparation)
 
