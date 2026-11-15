@@ -1,0 +1,14 @@
+# Audit identity phase P2 -- runs saas-os-audit-identity-report.service once
+# a day. The report only shows what the expiry command would remove; the
+# two-year rule is saas_os.core.audit_identity.expiry.record_expires_at.
+
+[Unit]
+Description=Daily saas-os audit identity expiry report trigger
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

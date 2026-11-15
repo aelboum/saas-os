@@ -28,6 +28,7 @@ _EXPECTED_JOB_NAMES = {
     "_cleanup_expired_sessions_job",
     "_run_outbox_event",  # RE-2: runs one claimed outbox event
     "_prune_billing_provider_events_job",  # ADR-0048: ledger retention
+    "_report_audit_identity_expiry_job",  # ADR-0045 amendment of 2026-11-14 (D7)
 }
 # RE-2: the durable outbox dispatch cycle, scheduled (not enqueued).
 # ADR-0053: the audit digests, every minute.

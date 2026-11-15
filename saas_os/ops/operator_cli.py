@@ -24,6 +24,9 @@ for purge, erasure, move and delete").
         (--tenant <id> | --all-purged [--after <tenant id>]) --reason "TICKET-6: yearly review"
     saas-os-operator hold-permission-grant-ledger --operator <user id> --tenant <id> \\
         --reference LEGAL-2026-014 --reason "TICKET-7: litigation hold"
+    saas-os-operator hold-audit-identity --operator <user id> --reference LEGAL-2026-014 \\
+        [--from-day 2026-01-01] [--to-day 2026-06-30] [--subject-ref <reference>] \\
+        --reason "TICKET-8: litigation hold"
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -99,6 +102,14 @@ decided here:
   only through the authenticated platform-admin routes, whose caller is the
   OIDC session's user, never a declared `--operator`. The former
   `release-permission-grant-ledger-hold` is removed.
+- `hold-audit-identity` is `saas_os.core.audit_identity.place_audit_identity_hold`
+  (audit identity phase P2; Core requires
+  `platform.security_retention_hold:manage`): a legal hold on platform audit
+  references, optionally one UTC day range and one reference, so the expiry
+  command and identity erasure keep them. One platform audit row. **Place
+  only** (owner decision O8): releasing such a hold is the authenticated
+  route `POST /platform/audit-identity/holds/{hold_id}/release`, never a
+  command.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`. `ai-hold-set`,
@@ -154,7 +165,7 @@ import logging
 import sys
 import uuid
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 # Imported for its table definitions: `core.audit_log` has foreign keys onto
@@ -460,6 +471,43 @@ def hold_permission_grant_ledger(args: argparse.Namespace) -> object:
     )
 
 
+def _day(raw: str | None, *, field: str) -> date | None:
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise OperatorInputError(f"{field} must be a date, YYYY-MM-DD (a UTC day).") from exc
+
+
+def hold_audit_identity(args: argparse.Namespace) -> object:
+    """Place a legal hold on platform audit references (audit identity P2).
+    Place only: no command releases one (owner decision O8)."""
+    from saas_os.core.audit_identity import place_audit_identity_hold
+
+    caller = UserCaller(_uuid(args.operator, field="--operator"))
+    result = place_audit_identity_hold(
+        reference=args.reference,
+        from_day=_day(args.from_day, field="--from-day"),
+        to_day=_day(args.to_day, field="--to-day"),
+        subject_ref=(
+            _uuid(args.subject_ref, field="--subject-ref") if args.subject_ref is not None else None
+        ),
+        caller=caller,
+        reason=_reason(args.reason),
+    )
+    return {
+        "hold_id": result.hold_id,
+        "scope": result.scope,
+        "reference": result.reference,
+        "from_day": result.from_day.isoformat() if result.from_day else None,
+        "to_day": result.to_day.isoformat() if result.to_day else None,
+        "subject_ref": result.subject_ref,
+        "placed_at": result.placed_at.isoformat(),
+        "platform_audit_id": result.platform_audit_id,
+    }
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
@@ -471,6 +519,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "apply-permission-grants": apply_permission_grants,
     "permission-grant-ledger-retention": permission_grant_ledger_retention,
     "hold-permission-grant-ledger": hold_permission_grant_ledger,
+    "hold-audit-identity": hold_audit_identity,
     **AI_COMMANDS,
 }
 
@@ -587,6 +636,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--operator", required=True, help="the platform operator's user id")
     p.add_argument("--tenant", required=True)
     p.add_argument("--reference", required=True, help="opaque legal matter reference")
+    p.add_argument("--reason", required=True)
+    common(p)
+
+    p = sub.add_parser(
+        "hold-audit-identity",
+        help="place a legal hold on platform audit references (place only, no release)",
+    )
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--reference", required=True, help="opaque legal matter reference")
+    p.add_argument("--from-day", help="first UTC day covered (YYYY-MM-DD); default open")
+    p.add_argument("--to-day", help="last UTC day covered (YYYY-MM-DD); default open")
+    p.add_argument("--subject-ref", help="one audit subject reference; default every subject")
     p.add_argument("--reason", required=True)
     common(p)
 

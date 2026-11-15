@@ -136,16 +136,54 @@ def _assert_no_raw_user_id(platform: PlatformWorld, *user_ids: uuid.UUID) -> Non
         assert hits == [], f"{user_id} is stored raw by {hits}"
 
 
+def _hold_evidence(platform: PlatformWorld, action: str, hold_id: uuid.UUID) -> uuid.UUID:
+    """The platform audit row a hold change needs since migration
+    `b6d2f8a4c1e7` (its deferred evidence trigger, ADR-0045 amendment of
+    2026-11-14). These tests seed holds directly; the routes that write the
+    real rows are covered by `test_audit_identity_p2_integration.py`."""
+    audit_id = uuid.uuid4()
+    platform.execute(
+        "INSERT INTO core.platform_audit_log (id, actor_type, system_authority, action, "
+        "target_type, target_id, outcome) VALUES (:i, 'system', 'platform_bootstrap', :a, "
+        "'audit_identity_hold', :h, 'success')",
+        {"i": audit_id, "a": action, "h": str(hold_id)},
+    )
+    return audit_id
+
+
 def _hold(
-    platform: PlatformWorld, reference: str, *, subject_ref: uuid.UUID | None = None
+    platform: PlatformWorld,
+    reference: str,
+    *,
+    subject_ref: uuid.UUID | None = None,
+    from_day: str | None = None,
+    to_day: str | None = None,
 ) -> uuid.UUID:
     hold_id = uuid.uuid4()
+    placed_by = _hold_evidence(platform, "platform.audit_identity.hold_place", hold_id)
     platform.execute(
         "INSERT INTO core.platform_audit_identity_holds "
-        "(id, reference, subject_ref, placed_by_platform_audit_id) VALUES (:i, :r, :s, :a)",
-        {"i": hold_id, "r": reference, "s": subject_ref, "a": uuid.uuid4()},
+        "(id, reference, subject_ref, from_day, to_day, placed_by_platform_audit_id) "
+        "VALUES (:i, :r, :s, CAST(:f AS date), CAST(:t AS date), :a)",
+        {
+            "i": hold_id,
+            "r": reference,
+            "s": subject_ref,
+            "f": from_day,
+            "t": to_day,
+            "a": placed_by,
+        },
     )
     return hold_id
+
+
+def _release_hold(platform: PlatformWorld, hold_id: uuid.UUID) -> None:
+    released_by = _hold_evidence(platform, "platform.audit_identity.hold_release", hold_id)
+    platform.execute(
+        "UPDATE core.platform_audit_identity_holds SET released_at = now(), "
+        "released_by_platform_audit_id = :a WHERE id = :h",
+        {"a": released_by, "h": hold_id},
+    )
 
 
 def _unauthorized(platform: PlatformWorld) -> UserCaller:
@@ -699,11 +737,7 @@ def test_a_hold_keeps_the_link_live_until_the_first_run_after_its_release(
     )
     assert _link_of(platform, reference)["user_id"] == user_id  # kept live
     assert platform.scalar("SELECT count(*) FROM core.platform_audit_subject_erasures") == 1
-    platform.execute(
-        "UPDATE core.platform_audit_identity_holds SET released_at = now(), "
-        "released_by_platform_audit_id = :a WHERE id = :h",
-        {"a": uuid.uuid4(), "h": hold_id},
-    )
+    _release_hold(platform, hold_id)
     after = erase_user_identity(user_id, (), actor_user_id=actor)
     assert after.platform_references_unlinked == 1  # the marker remained
     assert _link_of(platform, reference)["user_id"] is None
@@ -714,12 +748,7 @@ def test_a_hold_on_another_reference_or_day_does_not_cover_the_link(
 ) -> None:
     user_id, actor, reference = _linked_and_written(platform)
     _hold(platform, "LEGAL-OTHER", subject_ref=uuid.uuid4())
-    platform.execute(
-        "INSERT INTO core.platform_audit_identity_holds (id, reference, from_day, to_day, "
-        "placed_by_platform_audit_id) VALUES (:i, 'LEGAL-OLD', DATE '2000-01-01', "
-        "DATE '2000-12-31', :a)",
-        {"i": uuid.uuid4(), "a": uuid.uuid4()},
-    )
+    _hold(platform, "LEGAL-OLD", from_day="2000-01-01", to_day="2000-12-31")
     result = erase_user_identity(user_id, (), actor_user_id=actor)
     assert result.platform_references_unlinked == 1
     assert _link_of(platform, reference)["user_id"] is None

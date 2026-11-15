@@ -32,6 +32,7 @@ _PLATFORM_JOBS = {
     "_cleanup_expired_sessions_job",
     "_run_outbox_event",
     "_prune_billing_provider_events_job",  # ADR-0048: ledger retention
+    "_report_audit_identity_expiry_job",  # ADR-0045 amendment of 2026-11-14 (D7)
 }
 _PLATFORM_CRON_JOBS = {"_dispatch_outbox_cycle", "_audit_digest_cycle"}  # ADR-0053
 

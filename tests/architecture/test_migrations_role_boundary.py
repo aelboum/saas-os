@@ -1,13 +1,16 @@
-"""Who may reach the migrations-role transaction and the ledger deletion
-(owner decision B of 2026-11-02; ADR-0045 amendment of 2026-11-02).
+"""Who may reach the migrations-role transaction, the ledger deletion
+(owner decision B of 2026-11-02; ADR-0045 amendment of 2026-11-02) and the
+audit identity expiry (owner decision D7; audit identity phase P2).
 
 An AST scan of every module under `saas_os/`:
 
-- only `saas_os.core.permission_grants.expiry` imports
+- only `saas_os.core.permission_grants.expiry` and
+  `saas_os.core.audit_identity.expiry` import
   `saas_os.infra.db.migrations_role`, and only its session scope;
 - only the operator procedure `saas_os.ops.permission_grant_ledger_expiry`
-  imports the deletion (`saas_os.core.permission_grants.expiry`): no purge
-  step, job, route, product or other Core module reaches it;
+  imports the deletion (`saas_os.core.permission_grants.expiry`), and only
+  `saas_os.ops.audit_identity_expiry` imports the audit identity expiry:
+  no purge step, job, route, product or other Core module reaches either;
 - no public package re-exports either, so `import saas_os.<package>`
   never offers them.
 
@@ -24,6 +27,7 @@ import saas_os
 _ROOT = Path(saas_os.__file__).parent
 _ROLE_MODULE = "saas_os.infra.db.migrations_role"
 _EXPIRY_MODULE = "saas_os.core.permission_grants.expiry"
+_AUDIT_IDENTITY_EXPIRY_MODULE = "saas_os.core.audit_identity.expiry"
 
 
 def _importers(module: str, own_path: str) -> dict[str, set[str]]:
@@ -50,6 +54,7 @@ def _importers(module: str, own_path: str) -> dict[str, set[str]]:
 def test_only_the_deletion_opens_the_migrations_role_transaction() -> None:
     assert _importers(_ROLE_MODULE, "infra/db/migrations_role.py") == {
         "core/permission_grants/expiry.py": {"migrations_role_session_scope"},
+        "core/audit_identity/expiry.py": {"migrations_role_session_scope"},
     }
 
 
@@ -58,23 +63,34 @@ def test_only_the_operator_procedure_reaches_the_deletion() -> None:
     assert set(found) == {"ops/permission_grant_ledger_expiry.py"}, sorted(found)
 
 
+def test_only_the_operator_procedure_reaches_the_audit_identity_expiry() -> None:
+    found = _importers(_AUDIT_IDENTITY_EXPIRY_MODULE, "core/audit_identity/expiry.py")
+    assert set(found) == {"ops/audit_identity_expiry.py"}, sorted(found)
+
+
 def test_no_purge_code_mentions_the_deletion() -> None:
     """The deletion is never part of an automatic tenant purge."""
     for path in sorted((_ROOT / "core" / "tenancy").rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
         source = path.read_text(encoding="utf-8")
-        for name in ("expire_permission_grant_ledger_rows", "migrations_role"):
+        for name in (
+            "expire_permission_grant_ledger_rows",
+            "expire_audit_identity_links",
+            "migrations_role",
+        ):
             assert name not in source, (path.name, name)
 
 
 def test_no_public_package_exports_them() -> None:
+    import saas_os.core.audit_identity as audit_identity
     import saas_os.core.permission_grants as grants
     import saas_os.infra.db as infra_db
 
-    for package in (grants, infra_db):
+    for package in (audit_identity, grants, infra_db):
         exported = set(getattr(package, "__all__", ()))
         assert not exported & {
+            "expire_audit_identity_links",
             "expire_permission_grant_ledger_rows",
             "migrations_role_session_scope",
             "validate_migrations_role",

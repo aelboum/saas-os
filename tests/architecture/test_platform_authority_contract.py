@@ -150,6 +150,11 @@ _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/core/permission_grants/apply.py": "ADR 0060: permission grant migrations",
     "saas_os/core/permission_grants/retention.py": "permission grant ledger retention and holds",
     "saas_os/core/permission_grants/expiry.py": "manual deletion of expired ledger rows",
+    # Audit identity phase P2: legal holds on platform audit references and
+    # the expiry of links and markers, authorized through the chokepoint.
+    "saas_os/core/audit_identity/holds.py": "audit identity legal holds",
+    "saas_os/core/audit_identity/expiry.py": "the migrations-role audit identity expiry",
+    "saas_os/core/audit_identity/plan.py": "the read-only expiry plan",
     # Owner decisions of 2026-11-03: the authenticated retention API and the
     # approver eligibility register, authorized through the chokepoint.
     "saas_os/core/permission_grants/approvals.py": "ledger deletion request and its approvals",

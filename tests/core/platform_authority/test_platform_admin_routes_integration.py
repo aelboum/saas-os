@@ -37,6 +37,7 @@ from saas_os.api.platform import build_platform_app
 from saas_os.api.platform_admin import build_platform_admin_router, get_platform_admin_http_config
 from saas_os.api.platform_admin.router import PLATFORM_ROUTES, PREFIX, PlatformRoute
 from saas_os.api.v1 import register_tenant_suspension_permission, tenant_suspension_router
+from saas_os.core.audit_identity import place_audit_identity_hold
 from saas_os.core.feature_flags import create_flag, set_tenant_override
 from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.identity.sessions import issue_session
@@ -116,6 +117,7 @@ class Kit:
         self.scene, self.platform = scene, platform
         self.owner, self.owner_operator = platform.owner()  # keeps the invariants satisfiable
         self.flags: list[str] = []
+        self.seeded_holds: set[str] = set()  # audit identity holds placed for a release
         self.subject = platform.user()
         scene.session_for(self.subject)
         self.external_subject = f"subject-{uuid.uuid4().hex}"
@@ -308,6 +310,22 @@ class Kit:
             ),
             ("GET", r): (r, None, 200, None),
             ("GET", f"{r}/eligibility"): (f"{r}/eligibility", None, 200, None),
+            # ADR-0045 amendment of 2026-11-14: audit identity holds (P2).
+            ("GET", "/audit-identity/holds"): ("/audit-identity/holds", None, 200, None),
+            ("POST", "/audit-identity/holds"): (
+                "/audit-identity/holds",
+                {"reference": f"LEGAL-{uuid.uuid4().hex[:8]}", "reason": REASON},
+                201,
+                None,
+            ),
+            ("POST", "/audit-identity/holds/{hold_id}/release"): (
+                f"/audit-identity/holds/{self.audit_identity_hold_to_release()}/release"
+                if route.path == "/audit-identity/holds/{hold_id}/release"
+                else f"/audit-identity/holds/{some}/release",
+                reason,
+                200,
+                None,
+            ),
             ("POST", f"{r}/representatives/{{user_id}}/proposals"): (
                 f"{r}/representatives/{self.subject}/proposals",
                 {"designation_ref": "BOARD-1", "valid_until": later, **ticket},
@@ -365,6 +383,29 @@ class Kit:
             reason=REASON,
         ).hold_id
 
+    def audit_identity_hold_to_release(self) -> uuid.UUID:
+        """An active audit identity hold, placed by a hold manager of its own
+        (Core writes its evidence row; `PlatformWorld` truncates the table)."""
+        holder, _ = self.platform.operator([P.SECURITY_RETENTION_HOLD_MANAGE])
+        hold_id = place_audit_identity_hold(
+            reference=f"LEGAL-{uuid.uuid4().hex[:8]}",
+            caller=holder,
+            reason=REASON,
+        ).hold_id
+        self.seeded_holds.add(str(hold_id))
+        return hold_id
+
+    def clear_audit(self) -> None:
+        """`PlatformWorld.clear_audit`, except the placing rows of the audit
+        identity holds this kit seeded: migration `b6d2f8a4c1e7` refuses a
+        release whose hold has lost that evidence, which outside a test
+        harness nothing can remove. `_evidence` ignores the rows it keeps."""
+        self.platform.execute(
+            "DELETE FROM core.platform_audit_log WHERE NOT (action = "
+            "'platform.audit_identity.hold_place' AND target_id = ANY(:h))",
+            {"h": sorted(self.seeded_holds)},
+        )
+
     def send(self, client: TestClient, request: Request, headers: dict[str, str]) -> Any:
         return client.request(request.method, request.url, json=request.json, headers=headers)
 
@@ -398,14 +439,21 @@ def kit(scene: Scene, platform: PlatformWorld) -> Iterator[Kit]:
 _IDS = [f"{route.method} {route.path}" for route in PLATFORM_ROUTES]
 
 
-def _evidence(platform: PlatformWorld, **filters: Any) -> list[dict[str, Any]]:
+def _evidence(
+    platform: PlatformWorld, kit: Kit | None = None, **filters: Any
+) -> list[dict[str, Any]]:
     """Platform audit rows, without the login events: issuing a session to
     a user who is an operator records `platform.operator.session_issued`,
-    which says nothing about a request."""
+    which says nothing about a request. With `kit`, also without the placing
+    rows of its seeded audit identity holds (`Kit.clear_audit` keeps them)."""
+    seeded = kit.seeded_holds if kit is not None else set()
     return [
         row
         for row in platform.audit(**filters)
         if row["action"] != "platform.operator.session_issued"
+        and not (
+            row["action"] == "platform.audit_identity.hold_place" and row["target_id"] in seeded
+        )
     ]
 
 
@@ -437,7 +485,7 @@ def test_the_denial_matrix(
     revoke_operator(revoked_id, caller=kit.owner, reason=REASON)
     others, _ = platform.operator([p for p in P if p is not route.permission])
     only, _ = platform.operator([route.permission])
-    platform.clear_audit()
+    kit.clear_audit()
     for user_id in (
         platform.user(),
         tenant_admin.user_id,
@@ -447,7 +495,7 @@ def test_the_denial_matrix(
     ):
         response = kit.send(client, request, kit.token(user_id))
         assert (response.status_code, response.json()) == (404, _NOT_FOUND)
-    assert _evidence(platform) == []  # not operators: nothing is recorded about them
+    assert _evidence(platform, kit) == []  # not operators: nothing is recorded about them
 
     # An operator with every platform permission but this route's.
     refused = kit.send(client, request, kit.token(others.user_id))
@@ -457,10 +505,10 @@ def test_the_denial_matrix(
     assert denied["actor_user_id"] == others.user_id
     assert denied["target_type"] == "http_route"
     assert denied["target_id"] == f"{route.method} {PREFIX}{route.path}"  # as declared
-    assert _evidence(platform, outcome="success") == []  # and nothing was done
+    assert _evidence(platform, kit, outcome="success") == []  # and nothing was done
 
     # An operator with only this route's permission.
-    platform.clear_audit()
+    kit.clear_audit()
     response = kit.send(client, request, kit.token(only.user_id))
     assert response.status_code == request.success, response.text
     if request.refusal is not None:
@@ -471,7 +519,7 @@ def test_the_denial_matrix(
         assert (refusal["reason"], refusal["actor_user_id"]) == (request.refusal, only.user_id)
         return
     # Core performed this route's operation, and recorded that operator.
-    done = _evidence(platform, outcome="success")
+    done = _evidence(platform, kit, outcome="success")
     assert {row["actor_user_id"] for row in done} == {only.user_id}
     assert action in {row["action"] for row in done}, [row["action"] for row in done]
 

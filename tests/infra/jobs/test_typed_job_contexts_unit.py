@@ -78,6 +78,9 @@ def test_every_registered_job_has_its_expected_explicit_kind() -> None:
         "_prune_billing_provider_events_job": JobKind.SYSTEM,
         # ADR-0053: the audit digests, a scheduled system job.
         "_audit_digest_cycle": JobKind.SYSTEM,
+        # ADR-0045 amendment of 2026-11-14 (D7): the audit identity expiry
+        # report, a system job that only logs counts.
+        "_report_audit_identity_expiry_job": JobKind.SYSTEM,
     }
     assert worker_names == set(expected) - {
         "_run_continuous_learning_cycle_job",
