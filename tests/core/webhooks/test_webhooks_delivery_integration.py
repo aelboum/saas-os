@@ -151,7 +151,16 @@ def _require_reachable_database() -> None:
 
 @pytest.fixture
 def jobs_config() -> JobsConfig:
-    return JobsConfig(redis_url=_REDIS_URL, max_tries=2, retry_backoff_base_seconds=0.01)
+    # A dead-letter list of this test's own: the assertions below count it
+    # exactly and the cleanup deletes it, so the shared default key
+    # (`arq:dead-letter`), where other tests and real workers record
+    # entries, must not be the one used here.
+    return JobsConfig(
+        redis_url=_REDIS_URL,
+        max_tries=2,
+        retry_backoff_base_seconds=0.01,
+        dead_letter_key=f"test:dl:webhooks:{uuid.uuid4().hex[:8]}",
+    )
 
 
 @pytest.fixture

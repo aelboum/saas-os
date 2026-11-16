@@ -876,15 +876,19 @@ async def test_a_deadline_that_expires_between_retries_starts_no_further_attempt
     next, and the caller gets the error that caused the retry."""
     scene = world.scene(destinations=2)
     monkeypatch.setattr(service.random, "random", lambda: 0.5)  # backoff 0.5 s
+    # The deadline runs from the call, so the first attempt's database work
+    # (admission, the attempt row, its settlement) must leave more than the
+    # 0.5 s backoff: 4 s keeps that true on a loaded database, where 1.5 s
+    # did not, and the backoff then fell through to the second destination.
     rt, fake, gate = runtime(
         [AdapterError(ErrorCategory.RATE_LIMITED, possibly_accepted=False), _ok()],
-        total_deadline_seconds=1.5,
+        total_deadline_seconds=4.0,
     )
     waited: list[float] = []
 
     async def outlast_the_deadline(seconds: float) -> None:
         waited.append(seconds)
-        await asyncio.sleep(1.6)
+        await asyncio.sleep(4.1)
 
     rt = dataclasses.replace(rt, sleep=outlast_the_deadline)
     with pytest.raises(InferenceRateLimitedError):
