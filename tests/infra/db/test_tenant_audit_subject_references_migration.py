@@ -13,8 +13,9 @@ audit subject reference tables), against real PostgreSQL.
   transaction before it counts) -- and changes nothing; with the tables
   empty it drops them, and a re-upgrade recreates them.
 
-**Destructive to schema state for its duration**: downgrades one revision
-and re-applies it on whatever database `MIGRATIONS_DATABASE_URL` points at.
+**Destructive to schema state for its duration**: downgrades two
+revisions (to `b6d2f8a4c1e7`) and re-applies them on whatever database
+`MIGRATIONS_DATABASE_URL` points at.
 Disposable databases only. Marked `integration`.
 """
 
@@ -73,6 +74,11 @@ def _config() -> Config:
 def _exists(admin: Engine, table: str) -> bool:
     with admin.connect() as conn:
         return conn.execute(text("SELECT to_regclass(:t) IS NOT NULL"), {"t": table}).scalar_one()
+
+
+def _stamp(admin: Engine) -> str:
+    with admin.connect() as conn:
+        return conn.execute(text("SELECT version_num FROM alembic_version_saas_os")).scalar_one()
 
 
 def _app_role() -> str:
@@ -158,11 +164,17 @@ def test_the_downgrade_refuses_a_row_visible_only_under_its_tenant(admin: Engine
                 ),
                 {"t": tenant, "u": user},
             )
+        head = _stamp(admin)
         with pytest.raises(DBAPIError, match="refusing to drop it"):
             command.downgrade(_config(), _PREVIOUS)
-        # Nothing changed: still at the revision, the row still there, and
-        # the downgrade's lift of RLS rolled back with it.
+        # Nothing changed: still at head, the row still there, the
+        # downgrade's lift of RLS rolled back with it, and the indexes of the
+        # later revision `d4f8b2e6a9c1` (whose downgrade ran first, in the
+        # same transaction) are still there.
         assert all(_exists(admin, table) for table in _TABLES)
+        assert _exists(admin, "core.ix_audit_log_initiated_by_subject_ref")
+        assert _exists(admin, "core.ix_audit_log_owner_user_subject_ref")
+        assert _stamp(admin) == head
         with admin.begin() as conn:
             conn.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant)})
             assert conn.execute(text(f"SELECT count(*) FROM {_LINKS}")).scalar_one() == 1  # noqa: S608
