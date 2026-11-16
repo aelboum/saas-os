@@ -2,9 +2,47 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.14.0 (2026-11-16)
+
+The merge commit of pull request #280, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.14.0` resolves to that merge commit before pinning it, and with `git tag -v v0.14.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.13.0: `a2a9384fc6d6cfc9202d00750801527261173bdf`.
+
+It contains everything since v0.13.0 (`a2a9384`): pull requests #268 to #279 and this release, which are audit identity phases P2 and P3 (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, `docs/architecture/AUDIT-IDENTITY-P3-PLAN.md`). There are **four migrations** (the head moves from `e8a3c6f1d9b4` to `e1f5a8c3b7d9`), one of which builds two indexes on `core.audit_log` with `CREATE INDEX CONCURRENTLY`. **Tenant audit rows change shape**: a user who initiates a tenant action is now recorded as a reference, not as a user id. There is no new setting and no new permission. A minor release, not a patch: it adds migrations, HTTP routes, public functions and a changed audit row shape (ADR-0015, version numbers before 1.0).
+
+**Support:** 0.14 is fully supported. 0.13 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
+
+**Deployment steps (details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.13.0 to v0.14.0"):** read the changed audit row shape below first. Then run SaaS OS's migrations to `e1f5a8c3b7d9` before starting the new code. On a large `core.audit_log`, pre-build the two indexes of `d4f8b2e6a9c1` during a quiet period (statements in the guide) so the migration finds them ready; otherwise the migration builds them itself, without blocking writes, but for as long as the table scan takes. Nothing deletes or unlinks anything: the expiry command's `--apply` stays disabled (owner decision O9).
+
+**Changed: the shape of tenant audit rows** (#274, phase P3a; ADR-0063 option A). A tenant audit row initiated by a user now stores `initiated_by` as `{"type": "user", "subject_ref": "<reference>"}`, not the user's id. The reference is random, one per tenant, user and UTC day, and identity erasure unlinks it from the user. Platform `api_key.revoke` rows record `owner_user_subject_ref`, and permission grant application rows record `operator_user_subject_ref`, in place of the raw ids. Rows written before the migration keep their raw ids (decision D5). A product that reads `initiated_by`'s user id from tenant audit rows must change.
+
+**Added: legal holds on audit references** (#270 phase P2, #278 phase P3c; ADR-0045 amendments of 2026-11-14 and 2026-11-16). On the opt-in platform-admin router: `GET` and `POST /v1/platform/audit-identity/holds` and `POST /v1/platform/audit-identity/holds/{hold_id}/release` (release needs a fresh session), with the existing permission `platform.security_retention_hold:manage`. A hold covers the platform scope or, with `"scope": {"tenant_id": ...}`, one tenant's references; `GET` takes `tenant_id`. `saas-os-operator hold-audit-identity` places a hold (`--tenant` for a tenant hold); no command releases one. Each place or release writes its platform audit row in the same transaction, and a tenant hold also writes a row in the tenant's audit trail.
+
+**Added: the audit identity expiry report** (#270, #278). `python -m saas_os.ops.audit_identity_expiry` (migrations credential, permission `platform.security_retention:report`; `--tenant` for one tenant) prints what would expire and writes nothing; `--apply` exits 1 before connecting. The default worker registers `_report_audit_identity_expiry_job`; it runs only when enqueued, by `python -m saas_os.api.audit_identity_report_trigger` (`deploy/saas-os-audit-identity-report.timer`, daily), and logs the counts for the platform scope and each tenant with something to report. A tenant report is refused (`AuditIdentityIndexUnavailableError`) while an index of `d4f8b2e6a9c1` is missing or invalid.
+
+**Migration `b6d2f8a4c1e7`** (#270): a deferred constraint trigger on `core.platform_audit_identity_holds` refuses, at commit, a hold placed or released without its matching successful platform audit row. Locks that table only, milliseconds. The downgrade drops the trigger.
+
+**Migration `c7e3a9f2b4d8`** (#274): the tenant tables `core.audit_subject_links`, `core.audit_subject_erasures` and `core.audit_identity_holds`, under tenant row-level security; the application role gets SELECT and INSERT, UPDATE on the unlink and release columns only, and no DELETE. The downgrade refuses while any of the three holds a row, which is the case as soon as a user initiates any tenant action on the new code.
+
+**Migration `d4f8b2e6a9c1`** (#276): the partial expression indexes `ix_audit_log_initiated_by_subject_ref` and `ix_audit_log_owner_user_subject_ref` on `core.audit_log`, built `CONCURRENTLY` in an autocommit block (SHARE UPDATE EXCLUSIVE: audited writes continue). It drops an invalid leftover first, accepts an identical index built beforehand, and fails on an index of the same name with another definition. The downgrade drops both in its own transaction (ACCESS EXCLUSIVE on `core.audit_log` until it commits).
+
+**Migration `e1f5a8c3b7d9`** (#278): the same evidence trigger for `core.audit_identity_holds`, which also requires the platform row to name the hold's tenant; a tenant hold committed while a tenant is still bound is refused. Locks that table only (ACCESS EXCLUSIVE, milliseconds). The downgrade drops the trigger.
+
+**Public API:** additions only; no line of `tests/architecture/public_api_snapshot.txt` is changed or removed since v0.13.0. New: the module `saas_os.core.audit_identity` (holds, expiry report and their errors), `saas_os.core.audit_log.AuditSubjectLinkUnavailableError`, `saas_os.core.platform_authority.successful_event_target_tenant`, and three narrowed `saas_os.infra.db` helpers, `json_text_at`, `max_` and `index_is_valid`.
+
+**Documentation only:** #268 (v0.13.0 recorded as released), #269 (two ledger rows resolved), #271 (P2 merged; ADR-0063 proposed), #272 (ADR-0063 decided, option A), #273 (the P3 plan), #275, #277 and #279 (P3a, P3b and P3c recorded as merged).
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with this release only (the version).
+
+**Known limits** (`docs/P-ROADMAP.md` ledger):
+
+- the expiry command cannot delete or unlink yet (`--apply` disabled, owner decision O9), so references and links are kept beyond two years; the privacy notice must say so;
+- the reference lookup routes are not built (separate approval);
+- the tenant record bound reads `operator_user_subject_ref` without an index of its own: correct, slower for tenants with very large audit logs (LOW).
+
+The example pins move to v0.13.0 (`a2a9384`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `a2a9384` (v0.13.0)"). Migration head: `e1f5a8c3b7d9`. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.13.0 to v0.14.0".
+
 ## v0.13.0 (2026-11-14)
 
-The merge commit of pull request #267, the release pull request (ADR-0015, "One pull request per release"). Pull request #266 carried this release's version, notes and pins, but its entry named no pull request, which `scripts/release.py` requires, so #267 completes it and its merge commit is the release; #266's merge commit `a16bb90` is not tagged. The next release writes its full SHA here. Until then, check that the tag `v0.13.0` resolves to that merge commit before pinning it, and with `git tag -v v0.13.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.12.0: `c17c7b4fc2a25884d3994b56d42c7844e645b2ee`.
+Commit `a2a9384fc6d6cfc9202d00750801527261173bdf`, the merge commit of pull request #267, the release pull request (ADR-0015, "One pull request per release"). Pull request #266 carried this release's version, notes and pins, but its entry named no pull request, which `scripts/release.py` requires, so #267 completes it and its merge commit is the release; #266's merge commit `a16bb90` is not tagged. Main CI run 43583423816 passed on this commit. Check that the tag `v0.13.0` resolves to that SHA before pinning it, and with `git tag -v v0.13.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.12.0: `c17c7b4fc2a25884d3994b56d42c7844e645b2ee`.
 
 It contains everything since v0.12.0 (`c17c7b4`): pull requests #262 to #265 and this release. There is **one migration** (the head moves from `c7d2a9f4e1b6` to `e8a3c6f1d9b4`), the downgrade of the released migration `c7d2a9f4e1b6` gains a guard, and there are **four new settings**, all off or inert by default. There is no new permission. A minor release, not a patch: it adds an HTTP route, a job module, a migration and settings (ADR-0015, version numbers before 1.0).
 

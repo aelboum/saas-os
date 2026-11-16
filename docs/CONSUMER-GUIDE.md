@@ -997,6 +997,29 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 4. **Check the tag's signature** before pinning: `git tag -v v0.13.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 5. **Rolling back** to v0.12.0: stop enqueuing the retention job, downgrade SaaS OS's migrations to `c7d2a9f4e1b6` first (this revokes the DELETE grant and drops the trigger), then move the pin back. Rows the job deleted stay deleted. Going further, below `c7d2a9f4e1b6`, is refused once any attempt has been deleted (`docs/RUNBOOKS.md`, "AI usage reporting").
 
+### From v0.13.0 to v0.14.0
+
+`saas-os-update check` reports `REVIEW_REQUIRED` for this move (exit 20, policy version 4; checked on 2026-11-16 against `main` at `03bb147`, the last commit before the release pull request, from a copy of the scaffold pinned at v0.13.0 `a2a9384`: 25 commits, 85 changed paths: tests 34, authorization 12, architecture 10, internal 7, public API 5, documentation 4, migration 4, unknown 4, tenant RLS 3, dependency toolchain 2). Review is required for the four migrations, the changed shape of tenant audit rows and the new platform-admin routes; there is no new permission and no new setting.
+
+1. **Check what reads tenant audit rows.** From this release, a tenant audit row initiated by a user stores `initiated_by` as `{"type": "user", "subject_ref": "<reference>"}`, not the user's id: a random reference per tenant, user and UTC day, which identity erasure unlinks from the user. Platform `api_key.revoke` rows store `owner_user_subject_ref`, and permission grant application rows `operator_user_subject_ref`, instead of the raw ids. Rows written before the migration are unchanged. Change any code, report or export of yours that reads the user id from those keys.
+2. **Pre-build the indexes on a large audit log (optional).** Migration `d4f8b2e6a9c1` builds two indexes on `core.audit_log` with `CREATE INDEX CONCURRENTLY`: audited writes continue, but the migration runs for as long as the table scans take, and waits for long-running transactions. To keep the deployment short, build them beforehand during a quiet period, as the migrations role, outside a transaction:
+
+   ```sql
+   CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_audit_log_initiated_by_subject_ref
+       ON core.audit_log (tenant_id, ((metadata -> 'initiated_by') ->> 'subject_ref'))
+       WHERE (metadata -> 'initiated_by') ->> 'subject_ref' IS NOT NULL;
+   CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_audit_log_owner_user_subject_ref
+       ON core.audit_log (tenant_id, (metadata ->> 'owner_user_subject_ref'))
+       WHERE metadata ->> 'owner_user_subject_ref' IS NOT NULL;
+   ```
+
+   The migration accepts a valid index built this way. It drops an invalid leftover of a failed build and builds it again. It stops on an index of the same name with another definition, without dropping it: drop or rename that index, then run the upgrade again.
+3. **Migrate first.** Run SaaS OS's migrations to `e1f5a8c3b7d9` before starting the new code: `b6d2f8a4c1e7` (evidence trigger on the platform hold table), `c7e3a9f2b4d8` (the three tenant reference tables), `d4f8b2e6a9c1` (the indexes above), `e1f5a8c3b7d9` (evidence trigger on the tenant hold table). The two trigger migrations refuse to finish if an existing hold has no matching platform audit row; a database that never placed a hold has none. `docs/RUNBOOKS.md`, "Audit identity holds and expiry", gives the locks.
+4. **Nothing deletes anything.** The new platform-admin routes (`GET`/`POST /v1/platform/audit-identity/holds`, `POST /v1/platform/audit-identity/holds/{hold_id}/release`) are served only if you register the opt-in platform-admin router, and need the existing permission `platform.security_retention_hold:manage`. The expiry command and the report job only report: `--apply` exits 1 (owner decision O9). To run the daily report, install `deploy/saas-os-audit-identity-report.timer` and its service, or run `python -m saas_os.api.audit_identity_report_trigger` on your own schedule; the default worker already registers the job. Until expiry is enabled, references and their links are kept beyond two years: say so in your privacy notice.
+5. **Public API.** Additions only: no line of `tests/architecture/public_api_snapshot.txt` changed or was removed since v0.13.0. New: `saas_os.core.audit_identity`, `saas_os.core.audit_log.AuditSubjectLinkUnavailableError`, `saas_os.core.platform_authority.successful_event_target_tenant`, and `saas_os.infra.db.json_text_at`, `max_` and `index_is_valid`.
+6. **Check the tag's signature** before pinning: `git tag -v v0.14.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
+7. **Rolling back** to v0.13.0: plan it as forward-only once the new code has run. The downgrades of `e1f5a8c3b7d9`, `d4f8b2e6a9c1` and `b6d2f8a4c1e7` lose no data (dropping the indexes takes an ACCESS EXCLUSIVE lock on `core.audit_log` until the run commits), but the downgrade of `c7e3a9f2b4d8` refuses while any tenant reference, erasure marker or hold exists, which is the case as soon as a user initiates a tenant action. Audit rows written meanwhile keep their references.
+
 ## 15. Product deployment checklist
 
 SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Before production, with evidence kept by the product:
