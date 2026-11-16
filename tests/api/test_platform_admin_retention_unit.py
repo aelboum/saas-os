@@ -35,6 +35,7 @@ from saas_os.core.audit_identity import (
     AuditIdentityHoldAlreadyActiveError,
     AuditIdentityHoldAlreadyReleasedError,
     AuditIdentityHoldNotFoundError,
+    AuditIdentityHoldTenantNotFoundError,
     AuditIdentityRetentionError,
     AuditIdentitySessionEvidenceError,
     InvalidAuditIdentityRequestError,
@@ -90,6 +91,9 @@ _POSTS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     (_AIH, "place_audit_identity_hold", {
         "reference": "LEGAL-1", "from_day": "2026-01-01", "to_day": "2026-06-30",
         "subject_ref": str(_ID), "reason": "T-1"}),
+    # Phase P3c (plan question Q2): the same route with a tenant scope.
+    (_AIH, "place_audit_identity_hold", {
+        "scope": {"tenant_id": str(_ID)}, "reference": "LEGAL-1", "reason": "T-1"}),
     (f"{_AIH}/{_ID}/release", "release_audit_identity_hold", {"reason": "T-1"}),
 )  # fmt: skip
 
@@ -197,6 +201,7 @@ def test_every_audit_identity_hold_code_maps_to_exactly_one_status() -> None:
         (AuditIdentityHoldAlreadyActiveError(), 409),
         (AuditIdentityHoldAlreadyReleasedError(_ID), 409),
         (AuditIdentitySessionEvidenceError(), 409),
+        (AuditIdentityHoldTenantNotFoundError(_ID), 404),
     )
     assert {error.code for error, _status in cases} == set(AUDIT_IDENTITY_STATUS)
     for error, status in cases:
@@ -216,3 +221,26 @@ def test_a_hold_day_range_must_be_dates(chain: _Chain, spies: list[Any]) -> None
     )
     assert response.status_code == 422
     assert spies == []
+
+
+def test_a_hold_scope_is_the_platform_or_one_tenant(
+    chain: _Chain,  # noqa: F811
+    spies: list[Any],
+) -> None:
+    """Phase P3c (plan question Q2): `scope` defaults to the platform; a
+    tenant scope reaches Core as `tenant_id`; anything else is refused before
+    Core."""
+    client = _client()
+    client.post(_AIH, headers=_BEARER, json={"reference": "LEGAL-1", "reason": "T-1"})
+    client.post(
+        _AIH,
+        headers=_BEARER,
+        json={"scope": {"tenant_id": str(_ID)}, "reference": "LEGAL-1", "reason": "T-1"},
+    )
+    assert [kwargs["tenant_id"] for _name, _args, kwargs in spies] == [None, _ID]
+    for scope in ("tenant", {"tenant_id": "not-a-uuid"}, {"tenant_id": str(_ID), "x": 1}):
+        response = client.post(
+            _AIH, headers=_BEARER, json={"scope": scope, "reference": "LEGAL-1", "reason": "T-1"}
+        )
+        assert response.status_code == 422, scope
+    assert len(spies) == 2

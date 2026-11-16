@@ -285,14 +285,16 @@ saas_os.core.audit_identity.AuditIdentityHoldAlreadyActiveError = {"class": "cla
 saas_os.core.audit_identity.AuditIdentityHoldAlreadyReleasedError = {"class": "class AuditIdentityHoldAlreadyReleasedError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: uuid.UUID) -> None"}}
 saas_os.core.audit_identity.AuditIdentityHoldNotFoundError = {"class": "class AuditIdentityHoldNotFoundError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: uuid.UUID) -> None"}}
 saas_os.core.audit_identity.AuditIdentityHoldPage = {"class": "class AuditIdentityHoldPage()", "fields": ["holds", "next_cursor"]}
+saas_os.core.audit_identity.AuditIdentityHoldTenantNotFoundError = {"class": "class AuditIdentityHoldTenantNotFoundError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID) -> None"}}
 saas_os.core.audit_identity.AuditIdentityHoldView = {"class": "class AuditIdentityHoldView()", "fields": ["from_day", "id", "placed_at", "reference", "released_at", "scope", "subject_ref", "to_day"]}
+saas_os.core.audit_identity.AuditIdentityIndexUnavailableError = {"class": "class AuditIdentityIndexUnavailableError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self, index: str) -> None"}}
 saas_os.core.audit_identity.AuditIdentityRetentionError = {"class": "class AuditIdentityRetentionError(ValueError)"}
 saas_os.core.audit_identity.AuditIdentitySessionEvidenceError = {"class": "class AuditIdentitySessionEvidenceError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.core.audit_identity.InvalidAuditIdentityRequestError = {"class": "class InvalidAuditIdentityRequestError(AuditIdentityRetentionError)"}
 saas_os.core.audit_identity.audit_identity_expiry_report = "def audit_identity_expiry_report() -> AuditIdentityExpiryReport"
 saas_os.core.audit_identity.hold_set_digest = "def hold_set_digest(scope: str, hold_ids: Iterable[object]) -> str"
-saas_os.core.audit_identity.list_audit_identity_holds = "def list_audit_identity_holds(*, caller: object, active: bool | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> AuditIdentityHoldPage"
-saas_os.core.audit_identity.place_audit_identity_hold = "def place_audit_identity_hold(*, reference: str, caller: object, reason: str, from_day: date | None=None, to_day: date | None=None, subject_ref: uuid.UUID | None=None, session_evidence: object=None) -> AuditIdentityHold"
+saas_os.core.audit_identity.list_audit_identity_holds = "def list_audit_identity_holds(*, caller: object, active: bool | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE, tenant_id: uuid.UUID | None=None) -> AuditIdentityHoldPage"
+saas_os.core.audit_identity.place_audit_identity_hold = "def place_audit_identity_hold(*, reference: str, caller: object, reason: str, from_day: date | None=None, to_day: date | None=None, subject_ref: uuid.UUID | None=None, session_evidence: object=None, tenant_id: uuid.UUID | None=None) -> AuditIdentityHold"
 saas_os.core.audit_identity.reference_set_digest = "def reference_set_digest(scope: str, references: Iterable[object]) -> str"
 saas_os.core.audit_identity.release_audit_identity_hold = "def release_audit_identity_hold(hold_id: uuid.UUID, *, caller: object, reason: str, session_evidence: object) -> AuditIdentityHold"
 saas_os.core.audit_log.ActorType = {"class": "class ActorType(enum.StrEnum)"}
@@ -837,6 +839,7 @@ saas_os.core.platform_authority.run_oversight_read = "def run_oversight_read(*, 
 saas_os.core.platform_authority.run_platform_change = "def run_platform_change(*, caller: object, operation: str, target_type: str, change: Callable[[Session], PlatformChange], reason: str | None=None) -> Any"
 saas_os.core.platform_authority.run_tenant_oversight_read = "def run_tenant_oversight_read(*, caller: object, operation: str, tenant_id: uuid.UUID, target_type: str, read: Callable[[Session], OversightOutcome[Value]], request_metadata: dict[str, object] | None=None) -> Value"
 saas_os.core.platform_authority.run_tenant_platform_change = "def run_tenant_platform_change(*, caller: object, operation: str, target_type: str, tenant_id: uuid.UUID, tenant_action: str, tenant_resource_type: str, change: Callable[[Session], PlatformChange], reason: str | None=None) -> Any"
+saas_os.core.platform_authority.successful_event_target_tenant = "def successful_event_target_tenant(session: Session, *, action: str, target_type: str, target_id: str) -> uuid.UUID | None"
 saas_os.core.platform_authority.suspend_operator = "def suspend_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
 saas_os.core.platform_authority.validate_page_request = "def validate_page_request(cursor: object, limit: object, *, maximum: int) -> None"
 saas_os.core.platform_authority.validate_reason = "def validate_reason(reason: object) -> str"
@@ -1091,10 +1094,13 @@ saas_os.infra.db.get_database_config = "def get_database_config() -> DatabaseCon
 saas_os.infra.db.get_engine = "def get_engine() -> Engine"
 saas_os.infra.db.get_migrations_database_config = "def get_migrations_database_config() -> DatabaseConfig"
 saas_os.infra.db.get_session_factory = "def get_session_factory() -> sessionmaker[Session]"
+saas_os.infra.db.index_is_valid = "def index_is_valid(session: Session, qualified_name: str) -> bool"
 saas_os.infra.db.insert_ignoring_conflict_returning = "def insert_ignoring_conflict_returning(model: type[Any], values: Mapping[str, Any], *, index_elements: Sequence[Any], index_where: ColumnElement[bool], returning: Any) -> Any"
 saas_os.infra.db.is_statement_timeout = "def is_statement_timeout(error: BaseException) -> bool"
 saas_os.infra.db.is_transaction_conflict = "def is_transaction_conflict(error: BaseException) -> bool"
+saas_os.infra.db.json_text_at = "def json_text_at(column: ColumnExpressionArgument[Any], *keys: str) -> ColumnElement[str]"  # pragma: allowlist secret
 saas_os.infra.db.mapped_column = "re-export of sqlalchemy.orm.mapped_column"
+saas_os.infra.db.max_ = "def max_(column: ColumnExpressionArgument[Any]) -> ColumnElement[Any]"
 saas_os.infra.db.now = "def now() -> ColumnElement[datetime]"
 saas_os.infra.db.run_core_migrations = "def run_core_migrations(revision: str='head') -> None"
 saas_os.infra.db.select = "re-export of sqlalchemy.select"

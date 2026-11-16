@@ -284,3 +284,146 @@ def test_the_no_release_scan_catches_a_release_path() -> None:
         {"hold-audit-identity"},
         "from saas_os.core.audit_identity import release_audit_identity_hold\n",
     ) == ["release_audit_identity_hold"]
+
+
+# --- phase P3c: the tenant scope ------------------------------------------------------------
+
+
+def test_the_expiry_command_passes_a_tenant_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def spy(**kwargs: object) -> object:
+        seen.append(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(command, "expire_audit_identity_links", spy)
+    tenant = uuid.uuid4()
+    base = ["--operator", str(uuid.uuid4()), "--reason", "T-1"]
+    assert _run([*base, "--tenant", str(tenant)], monkeypatch) == 1
+    assert _run(base, monkeypatch) == 1
+    assert [call["tenant_id"] for call in seen] == [tenant, None]
+    assert _run([*base, "--tenant", "not-a-uuid"], monkeypatch) == 2
+    assert "invalid input" in capsys.readouterr().err
+
+
+def test_the_hold_command_passes_a_tenant_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, object]] = []
+
+    def spy(**kwargs: object) -> object:
+        seen.append(kwargs)
+        raise RuntimeError("stop")
+
+    import saas_os.core.audit_identity as audit_identity
+
+    monkeypatch.setattr(audit_identity, "place_audit_identity_hold", spy)
+    tenant = uuid.uuid4()
+    args = operator_cli._build_parser().parse_args(
+        [
+            "hold-audit-identity",
+            "--operator",
+            str(uuid.uuid4()),
+            "--reference",
+            "LEGAL-1",
+            "--tenant",
+            str(tenant),
+            "--reason",
+            "T-1",
+        ]
+    )
+    with pytest.raises(RuntimeError, match="stop"):
+        operator_cli.hold_audit_identity(args)
+    assert seen[0]["tenant_id"] == tenant
+
+
+def test_the_report_job_reports_each_tenant_with_something_to_report(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import asyncio
+    import logging
+
+    from saas_os.core.audit_identity import jobs
+    from saas_os.core.audit_identity.plan import AuditIdentityExpiryReport
+
+    def report(scope: str, links: int, holds: int = 0) -> AuditIdentityExpiryReport:
+        return AuditIdentityExpiryReport(
+            as_of=datetime(2030, 1, 1, tzinfo=UTC),
+            scope=scope,
+            eligible_links=links,
+            eligible_links_digest="0" * 64,
+            links_to_unlink=0,
+            markers=0,
+            active_holds=holds,
+            active_holds_digest="0" * 64,
+            oldest_eligible_day=None,
+        )
+
+    busy, idle, held = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    reports = {busy: report(f"tenant:{busy}", 2), idle: report(f"tenant:{idle}", 0),
+               held: report(f"tenant:{held}", 0, holds=1)}  # fmt: skip
+    monkeypatch.setattr(jobs, "audit_identity_expiry_report", lambda: report("platform", 0))
+    monkeypatch.setattr(jobs, "all_tenant_ids", lambda: [busy, idle, held])
+    monkeypatch.setattr(jobs, "tenant_audit_identity_expiry_report", reports.__getitem__)
+    with caplog.at_level(logging.INFO, logger=jobs.logger.name):
+        asyncio.run(jobs._report_audit_identity_expiry_job(object()))  # type: ignore[arg-type]
+    scopes = [
+        getattr(r, "scope", None)
+        for r in caplog.records
+        if r.getMessage() == "audit_identity_expiry_report"
+    ]
+    assert scopes == ["platform", f"tenant:{busy}", f"tenant:{held}"]
+
+
+def test_the_report_job_fails_loudly_without_the_indexes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import asyncio
+    import logging
+
+    from saas_os.core.audit_identity import AuditIdentityIndexUnavailableError, jobs
+
+    def refuse(_tenant: uuid.UUID) -> object:
+        raise AuditIdentityIndexUnavailableError("ix_audit_log_owner_user_subject_ref")
+
+    monkeypatch.setattr(jobs, "audit_identity_expiry_report", lambda: _platform_report())
+    monkeypatch.setattr(jobs, "all_tenant_ids", lambda: [uuid.uuid4()])
+    monkeypatch.setattr(jobs, "tenant_audit_identity_expiry_report", refuse)
+    with (
+        caplog.at_level(logging.ERROR, logger=jobs.logger.name),
+        pytest.raises(AuditIdentityIndexUnavailableError),
+    ):
+        asyncio.run(jobs._report_audit_identity_expiry_job(object()))  # type: ignore[arg-type]
+    refused = [
+        r for r in caplog.records if r.getMessage() == "audit_identity_expiry_report_refused"
+    ]
+    assert [getattr(r, "index", None) for r in refused] == ["ix_audit_log_owner_user_subject_ref"]
+
+
+def _platform_report() -> object:
+    from saas_os.core.audit_identity.plan import AuditIdentityExpiryReport
+
+    return AuditIdentityExpiryReport(
+        as_of=datetime(2030, 1, 1, tzinfo=UTC),
+        scope="platform",
+        eligible_links=0,
+        eligible_links_digest="0" * 64,
+        links_to_unlink=0,
+        markers=0,
+        active_holds=0,
+        active_holds_digest="0" * 64,
+        oldest_eligible_day=None,
+    )
+
+
+def test_json_text_at_inlines_identifier_keys_only() -> None:
+    from saas_os.core.audit_log.models import AuditLogEntry
+    from saas_os.infra.db import json_text_at
+
+    expression = json_text_at(AuditLogEntry.entry_metadata, "initiated_by", "subject_ref")
+    assert "initiated_by" in str(expression.compile(compile_kwargs={"literal_binds": True}))
+    for bad in ("", "Initiated", "a'b", "x;drop", "a-b"):
+        with pytest.raises(ValueError, match="identifier"):
+            json_text_at(AuditLogEntry.entry_metadata, bad)
+    with pytest.raises(ValueError, match="at least one key"):
+        json_text_at(AuditLogEntry.entry_metadata)

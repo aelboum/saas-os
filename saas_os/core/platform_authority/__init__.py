@@ -27,6 +27,7 @@ from saas_os.core.platform_authority.audit import (
     record_platform_event_in_transaction,
     record_platform_refusal,
     recording_platform_refusal,
+    successful_event_target_tenant,
     validate_reason,
 )
 from saas_os.core.platform_authority.authorization import (
@@ -171,6 +172,7 @@ __all__ = [
     "PlatformRecoveryResult",
     # audit
     "record_platform_event_in_transaction",
+    "successful_event_target_tenant",
     "record_platform_refusal",
     "recording_platform_refusal",
     "record_operator_session_issued_in_transaction",

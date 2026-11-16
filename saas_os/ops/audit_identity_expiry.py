@@ -11,8 +11,10 @@ and erasure markers: audit identity phase P2 (owner decision D7,
         --confirm-unlinks N --confirm-markers N
 
 It is `saas_os.core.audit_identity.expire_audit_identity_links` with
-`UserCaller(<operator>)`. Without `--apply` (the default) it reports the
-platform scope's plan: the links eligible for deletion and their digest,
+`UserCaller(<operator>)`, for the platform scope or, with `--tenant <id>`,
+for one tenant (audit identity phase P3c; refused while a phase P3b index
+on `core.audit_log` is missing or invalid). Without `--apply` (the default)
+it reports that scope's plan: the links eligible for deletion and their digest,
 the links of erased subjects to unlink, the markers to delete, and the
 active holds and their digest. It writes nothing.
 
@@ -121,6 +123,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         reason=reason,
         apply=args.apply,
         confirmation=confirmation,
+        tenant_id=_uuid(args.tenant, field="--tenant") if args.tenant is not None else None,
     )
     return _output(report)
 
@@ -140,6 +143,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the platform operator's user id (declared, not authenticated)",
     )
     parser.add_argument("--reason", required=True)
+    parser.add_argument(
+        "--tenant", help="one tenant's scope (phase P3c); default the platform scope"
+    )
     parser.add_argument(
         "--apply", action="store_true", help="delete and unlink (disabled: refused)"
     )

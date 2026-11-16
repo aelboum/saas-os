@@ -289,6 +289,25 @@ def record_platform_event_in_transaction(
 OVERSIGHT_ATTEMPT_SUFFIX = "_attempt"
 
 
+def successful_event_target_tenant(
+    session: Session, *, action: str, target_type: str, target_id: str
+) -> uuid.UUID | None:
+    """The target tenant of the successful platform audit row with this
+    action and target, or `None` when no such row names a tenant. Read
+    only, with no tenant bound (the tenant-context exclusion policy hides
+    the log otherwise). The tenant audit identity hold release reads a
+    hold's tenant from the row that placed it (audit identity phase P3c)."""
+    return session.execute(
+        select(PlatformAuditLogEntry.target_tenant_id).where(
+            PlatformAuditLogEntry.action == action,
+            PlatformAuditLogEntry.outcome == PlatformAuditOutcome.SUCCESS.value,
+            PlatformAuditLogEntry.target_type == target_type,
+            PlatformAuditLogEntry.target_id == target_id,
+            PlatformAuditLogEntry.target_tenant_id.is_not(None),
+        )
+    ).scalar_one_or_none()
+
+
 def oversight_attempt_action(operation: str) -> str:
     """The audit action of the attempt row of the oversight read
     `operation` (a key of the declared operation table)."""

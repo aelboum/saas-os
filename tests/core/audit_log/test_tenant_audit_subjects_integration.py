@@ -220,13 +220,25 @@ def test_erasure_unlinks_the_tenants_live_links_keeps_held_ones_and_leaves_other
             ),
             {"t": tenant_a, "u": user},
         ).scalar_one()
+        # The platform row that placed the hold: migration `e1f5a8c3b7d9`
+        # (phase P3c) refuses a tenant hold without it.
+        hold_id, audit_id = uuid.uuid4(), uuid.uuid4()
+        conn.execute(
+            text(
+                "INSERT INTO core.platform_audit_log (id, actor_type, system_authority, action, "
+                "target_type, target_id, target_tenant_id, outcome) VALUES (:a, 'system', "
+                "'platform_bootstrap', 'platform.audit_identity.hold_place', "
+                "'audit_identity_hold', :h, :t, 'success')"
+            ),
+            {"a": audit_id, "h": str(hold_id), "t": tenant_a},
+        )
         conn.execute(
             text(
                 "INSERT INTO core.audit_identity_holds (id, tenant_id, reference, from_day, "
                 "to_day, placed_by_platform_audit_id) VALUES (:i, :t, 'LEGAL-P3A', "
                 "DATE '2026-01-01', DATE '2026-01-31', :a)"
             ),
-            {"i": uuid.uuid4(), "t": tenant_a, "a": uuid.uuid4()},
+            {"i": hold_id, "t": tenant_a, "a": audit_id},
         )
 
     with tenant_session_scope(tenant_a) as session:

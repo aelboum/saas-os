@@ -22,15 +22,19 @@ import logging
 
 from arq.worker import Function
 
-from saas_os.core.audit_identity.plan import audit_identity_expiry_report
+from saas_os.core.audit_identity.errors import AuditIdentityIndexUnavailableError
+from saas_os.core.audit_identity.plan import (
+    AuditIdentityExpiryReport,
+    all_tenant_ids,
+    audit_identity_expiry_report,
+    tenant_audit_identity_expiry_report,
+)
 from saas_os.infra.jobs import SystemJobContext, register_system_job
 
 logger = logging.getLogger(__name__)
 
 
-async def _report_audit_identity_expiry_job(context: SystemJobContext) -> None:
-    """A system job with no payload: report, never delete."""
-    report = audit_identity_expiry_report()
+def _log(report: AuditIdentityExpiryReport) -> None:
     logger.info(
         "audit_identity_expiry_report",
         extra={
@@ -48,6 +52,27 @@ async def _report_audit_identity_expiry_job(context: SystemJobContext) -> None:
             ),
         },
     )
+
+
+async def _report_audit_identity_expiry_job(context: SystemJobContext) -> None:
+    """A system job with no payload: report, never delete. The platform
+    scope, then every tenant in its own transaction (phase P3c). A tenant
+    with nothing to report and no active hold is not logged. While a phase
+    P3b index is missing or invalid, no tenant is planned: the job logs
+    `audit_identity_expiry_report_refused` with the index and raises, so the
+    failure is visible to the queue."""
+    _log(audit_identity_expiry_report())
+    for tenant_id in all_tenant_ids():
+        try:
+            report = tenant_audit_identity_expiry_report(tenant_id)
+        except AuditIdentityIndexUnavailableError as refused:
+            logger.error(
+                "audit_identity_expiry_report_refused",
+                extra={"code": refused.code, "index": refused.index},
+            )
+            raise
+        if report.eligible_links or report.links_to_unlink or report.markers or report.active_holds:
+            _log(report)
 
 
 AUDIT_IDENTITY_REPORT_JOB_FUNCTIONS: list[Function] = [

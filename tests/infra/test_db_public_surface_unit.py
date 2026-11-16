@@ -117,6 +117,16 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "utc_transaction_date",
         "insert_ignoring_conflict_returning",
         "current_transaction_isolation",
+        # Audit identity phase P3c: three more narrowed primitives for the
+        # tenant record bound. `json_text_at` builds `col -> 'k' ->> 'k'`
+        # with each key checked against a plain-identifier pattern and
+        # inlined as a text literal (so the P3b expression indexes match);
+        # `max_` is `func.max`, named; `index_is_valid` reads one fixed
+        # `pg_index` query with the index name bound. None takes SQL text,
+        # hands out a connection or changes a setting.
+        "json_text_at",
+        "max_",
+        "index_is_valid",
     }
 
 
