@@ -48,7 +48,16 @@ _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 def jobs_config() -> JobsConfig:
     # Fast retries (0.01s base) and a small max_tries so this test doesn't
     # spend real wall-clock time waiting out backoff.
-    return JobsConfig(redis_url=_REDIS_URL, max_tries=2, retry_backoff_base_seconds=0.01)
+    # A dead-letter list of this test's own: the assertions below count it
+    # exactly and the cleanup deletes it, so the shared default key
+    # (`arq:dead-letter`), where other tests and real workers record
+    # entries, must not be the one used here.
+    return JobsConfig(
+        redis_url=_REDIS_URL,
+        max_tries=2,
+        retry_backoff_base_seconds=0.01,
+        dead_letter_key=f"test:dl:jobs:{uuid.uuid4().hex[:8]}",
+    )
 
 
 @pytest.fixture
