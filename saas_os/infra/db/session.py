@@ -219,6 +219,22 @@ def current_transaction_isolation(session: Session) -> str:
     return str(session.execute(_TRANSACTION_ISOLATION).scalar_one())
 
 
+_INDEX_IS_VALID = text(
+    "SELECT coalesce(bool_and(i.indisvalid AND i.indisready), false) FROM pg_catalog.pg_index i "
+    "WHERE i.indexrelid = to_regclass(:name)"
+)
+
+
+def index_is_valid(session: Session, qualified_name: str) -> bool:
+    """Whether the index `qualified_name` (`schema.index`) exists and is
+    valid and ready (`pg_index.indisvalid` and `indisready`): a planner can
+    use it. `False` when it is missing, or left invalid by a failed
+    `CREATE INDEX CONCURRENTLY`. Read only; any role can read `pg_index`.
+    The tenant audit identity expiry plan refuses to run without its
+    indexes (audit identity phase P3c)."""
+    return bool(session.execute(_INDEX_IS_VALID, {"name": qualified_name}).scalar_one())
+
+
 _QUERY_CANCELED_SQLSTATE = "57014"
 _MAX_STATEMENT_TIMEOUT_MILLISECONDS = 2_147_483_647
 

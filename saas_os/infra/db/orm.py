@@ -59,6 +59,7 @@ never a raw string.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
@@ -87,6 +88,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import cast as _cast
 from sqlalchemy import func as _func
+from sqlalchemy import literal as _literal
 from sqlalchemy.dialects.postgresql import ARRAY as _ARRAY
 from sqlalchemy.dialects.postgresql import insert as _pg_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -115,6 +117,8 @@ __all__ = [
     "utc_transaction_date",
     "UUIDArray",
     "sum_",
+    "max_",
+    "json_text_at",
     "insert_ignoring_conflict_returning",
     "select",
     "update",
@@ -152,6 +156,40 @@ def utc_transaction_date() -> ColumnElement[date]:
     docs/architecture/AUDIT-P1-SQL-REVIEW.md, check T1). The audit subject
     references use it as their day (owner decision D1)."""
     return _cast(_func.timezone("UTC", _func.now()), Date)
+
+
+_JSON_KEY = re.compile(r"[a-z][a-z0-9_]{0,62}")
+
+
+def json_text_at(column: ColumnExpressionArgument[Any], *keys: str) -> ColumnElement[str]:
+    """`column -> 'k1' -> ... ->> 'kn'` on a `json` column: the text at the
+    path of keys, as a SQL expression with every key inlined as a text
+    literal (not a bound parameter). An expression index on the same path
+    (`((metadata -> 'initiated_by') ->> 'subject_ref')`) matches it only so:
+    with bound keys, or with SQLAlchemy's own JSON indexing (which also
+    casts), the planner cannot use the index. Each key must be a plain
+    lowercase identifier, so a key is never SQL; anything else raises
+    `ValueError`. The audit identity expiry record bound (phase P3c) is its
+    user."""
+    if not keys:
+        raise ValueError("json_text_at needs at least one key.")
+    for key in keys:
+        if not isinstance(key, str) or _JSON_KEY.fullmatch(key) is None:
+            raise ValueError("a JSON key must be a plain lowercase identifier.")
+    expression: Any = column
+    for key in keys[:-1]:
+        expression = expression.op("->")(_literal(key, type_=Text, literal_execute=True))
+    return expression.op("->>", return_type=Text)(
+        _literal(keys[-1], type_=Text, literal_execute=True)
+    )
+
+
+def max_(column: ColumnExpressionArgument[Any]) -> ColumnElement[Any]:
+    """SQL `MAX(column)`, as a SQL expression -- `sqlalchemy.func.max()`,
+    named and narrowed (module docstring, CP-07 J-INFRA-05). The audit
+    identity expiry record bound needs the latest `created_at` per
+    reference."""
+    return _func.max(column)
 
 
 def UUIDArray() -> _ARRAY[uuid.UUID]:  # noqa: N802 -- a column type, named like one

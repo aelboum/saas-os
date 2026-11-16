@@ -275,6 +275,11 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     "saas_os/core/audit_identity/plan.py": {
         "audit_identity_expiry_report": "system report (audit identity expiry): global link, marker, hold and platform audit rows, read only, untenanted",
+        # Audit identity phase P3c: the tenant list (core.tenants, global)
+        # and one tenant's report, which binds that tenant at once
+        # (pinned below in _BIND_TENANT_SCOPE_CALLERS).
+        "all_tenant_ids": "system report (audit identity expiry): the global tenant list, read only",
+        "tenant_audit_identity_expiry_report": "system report (audit identity expiry): one tenant's plan, bound to that tenant at once, read only",
     },
     # Owner decisions of 2026-11-03: the authenticated retention API and the
     # approver register. Platform transactions on global tables (untenanted);
@@ -693,6 +698,23 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     # tenant audit row (releasing an AI budget reservation).
     "saas_os/core/platform_authority/changes.py": {
         "run_tenant_platform_change": "one named tenant's rows and audit row, platform row outside",
+    },
+    # Audit identity phase P3c: a tenant legal hold's change binds its
+    # tenant for the hold row and the tenant audit row; the platform row and
+    # the deferred evidence check run with no tenant bound.
+    "saas_os/core/audit_identity/holds.py": {
+        "_place_tenant_hold": "a tenant hold: the hold row and its tenant audit row",
+        "_release_tenant_hold": "a tenant hold's release and its tenant audit row",
+    },
+    # Audit identity phase P3c: the expiry plan of one tenant reads that
+    # tenant's links, markers, holds and audit rows; the migrations-role
+    # command changes them by id; platform rows outside the block.
+    "saas_os/core/audit_identity/plan.py": {
+        "tenant_audit_identity_expiry_report": "one tenant's expiry plan, read only",
+    },
+    "saas_os/core/audit_identity/expiry.py": {
+        "_scope_report": "one tenant's expiry plan, read only",
+        "_scope_apply": "one tenant's expired links and markers, by id",
     },
     "saas_os/core/rbac/authorization.py": {
         "_tenant_grants_permission": "can(): role grants at one candidate tenant",

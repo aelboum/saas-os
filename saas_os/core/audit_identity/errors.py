@@ -1,5 +1,5 @@
-"""Refusals of the audit identity retention operations (phase P2: legal holds
-on platform audit references and the expiry command;
+"""Refusals of the audit identity retention operations (phases P2 and P3c:
+legal holds on platform and tenant audit references and the expiry command;
 docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md sections 4.9
 and 4.10).
 
@@ -37,6 +37,17 @@ class AuditIdentityHoldNotFoundError(AuditIdentityRetentionError):
     def __init__(self, hold_id: uuid.UUID) -> None:
         super().__init__(f"No audit identity hold {hold_id}.")
         self.hold_id = hold_id
+
+
+class AuditIdentityHoldTenantNotFoundError(AuditIdentityRetentionError):
+    """A tenant-scope hold names a tenant that does not exist. A hold may be
+    placed on a tenant in any status, purged ones included (phase P3c)."""
+
+    code = "tenant_not_found"
+
+    def __init__(self, tenant_id: uuid.UUID) -> None:
+        super().__init__(f"No tenant {tenant_id}.")
+        self.tenant_id = tenant_id
 
 
 class AuditIdentityHoldAlreadyActiveError(AuditIdentityRetentionError):
@@ -83,6 +94,23 @@ class AuditIdentityExpiryDisabledError(AuditIdentityRetentionError):
         )
 
 
+class AuditIdentityIndexUnavailableError(AuditIdentityRetentionError):
+    """A tenant scope's expiry plan needs the `core.audit_log` subject
+    reference indexes of migration `d4f8b2e6a9c1` (phase P3b), and one of
+    them is missing or not valid. Without them the record bound would scan
+    the table, so the plan is refused (docs/architecture/
+    AUDIT-IDENTITY-P3-PLAN.md section 3, M2, deployment order)."""
+
+    code = "index_unavailable"
+
+    def __init__(self, index: str) -> None:
+        super().__init__(
+            f"Index core.{index} is missing or not valid; run the migrations "
+            "(saas-os-migrate upgrade) before a tenant expiry plan."
+        )
+        self.index = index
+
+
 class AuditIdentityExpiryConfirmationMismatchError(AuditIdentityRetentionError):
     """With `apply`: a confirmed count or digest differs from what the run
     recomputed under its locks. Nothing was deleted or unlinked."""
@@ -102,6 +130,8 @@ __all__ = [
     "AuditIdentityHoldAlreadyActiveError",
     "AuditIdentityHoldAlreadyReleasedError",
     "AuditIdentityHoldNotFoundError",
+    "AuditIdentityHoldTenantNotFoundError",
+    "AuditIdentityIndexUnavailableError",
     "AuditIdentityRetentionError",
     "AuditIdentitySessionEvidenceError",
     "InvalidAuditIdentityRequestError",

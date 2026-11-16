@@ -68,6 +68,9 @@ from saas_os.infra.db import (
 
 _LOCK_HOLDS_NAMESPACE = "saas_os.audit_identity_holds"
 _LOCK_SUBJECT_NAMESPACE = "saas_os.audit_subject"
+# The namespace of a tenant's hold lock `H`, with `tenant_holds_lock_key()`:
+# the hold changes take it exclusively, erasure and expiry shared (phase P3c).
+TENANT_HOLDS_LOCK_NAMESPACE = _LOCK_HOLDS_NAMESPACE
 
 _READ_COMMITTED = "read committed"
 _MAX_COLLISION_ATTEMPTS = 3

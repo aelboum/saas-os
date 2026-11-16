@@ -46,7 +46,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -64,6 +64,7 @@ from saas_os.core.audit_identity import (
     AuditIdentityHoldAlreadyActiveError,
     AuditIdentityHoldAlreadyReleasedError,
     AuditIdentityHoldNotFoundError,
+    AuditIdentityHoldTenantNotFoundError,
     AuditIdentityRetentionError,
     AuditIdentitySessionEvidenceError,
     InvalidAuditIdentityRequestError,
@@ -599,11 +600,19 @@ class PlaceHoldRequest(_RetentionRequest):
     reason: Reason
 
 
-class PlaceAuditIdentityHoldRequest(_RetentionRequest):
-    """A hold on platform audit references: a matter reference, an optional
-    inclusive UTC day range and an optional single reference. No user id
-    and no identity field: the caller is the session's user."""
+class TenantHoldScope(_RetentionRequest):
+    """The tenant scope of an audit identity hold (phase P3c)."""
 
+    tenant_id: uuid.UUID
+
+
+class PlaceAuditIdentityHoldRequest(_RetentionRequest):
+    """A hold on audit references: its scope (`"platform"`, the default, or
+    `{"tenant_id": ...}`; plan question Q2), a matter reference, an optional
+    inclusive UTC day range and an optional single reference of the scope.
+    No user id and no identity field: the caller is the session's user."""
+
+    scope: Literal["platform"] | TenantHoldScope = "platform"
     reference: Reference
     from_day: date | None = None
     to_day: date | None = None
@@ -875,6 +884,7 @@ AUDIT_IDENTITY_STATUS: dict[str, int] = {
     "hold_already_active": 409,
     "hold_already_released": 409,
     "session_evidence_invalid": 409,
+    "tenant_not_found": 404,
 }
 
 
@@ -887,6 +897,8 @@ def _audit_identity_response(error: AuditIdentityRetentionError) -> HTTPExceptio
         return invalid_request(str(error))
     if isinstance(error, AuditIdentityHoldNotFoundError):
         return not_found("hold")
+    if isinstance(error, AuditIdentityHoldTenantNotFoundError):
+        return not_found("tenant")
     if isinstance(
         error,
         AuditIdentityHoldAlreadyActiveError
@@ -1593,11 +1605,17 @@ def build_router() -> APIRouter:
         active: bool | None = None,
         cursor: uuid.UUID | None = None,
         limit: PageSize = None,
+        tenant_id: uuid.UUID | None = None,
         context: PlatformRequestContext = gate("GET", _AIH),
     ) -> AuditIdentityHoldPageResponse:
+        """The platform scope's holds, or with `tenant_id` (the scope's query
+        form) one tenant's (phase P3c)."""
         with _translating():
             page = list_audit_identity_holds(
-                caller=_caller(context), active=active, **_page_arguments(cursor, limit)
+                caller=_caller(context),
+                active=active,
+                tenant_id=tenant_id,
+                **_page_arguments(cursor, limit),
             )
         return AuditIdentityHoldPageResponse(
             holds=[
@@ -1630,6 +1648,7 @@ def build_router() -> APIRouter:
                 caller=_caller(context),
                 reason=body.reason,
                 session_evidence=_evidence(context),
+                tenant_id=None if body.scope == "platform" else body.scope.tenant_id,
             )
         return _audit_identity_hold_response(result)
 

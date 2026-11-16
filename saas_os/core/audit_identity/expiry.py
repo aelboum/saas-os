@@ -1,7 +1,11 @@
-"""Expiry of platform audit subject links and erasure markers: audit identity
-phase P2 (docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md
-sections 4.8, 4.10 and 4.11; owner decisions D4, D7, D8, O9 and O10, and the
-exact two-year rule kept on 2026-11-03).
+"""Expiry of audit subject links and erasure markers: the platform scope
+(audit identity phase P2) and one tenant at a time (phase P3c)
+(docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md sections 4.8,
+4.10 and 4.11; owner decisions D4, D7, D8, O9 and O10, and the exact
+two-year rule kept on 2026-11-03). A tenant scope runs in its own
+transaction with the tenant bound: the tenant tables are under FORCE row-level
+security, which binds the migrations role too; its platform rows are written
+outside the bound block (ADR-0045 section 9c).
 
 **`--apply` is disabled (owner decision O9).** "Ledger expiry `--apply`
 stays disabled until an authenticated, register-eligible approval mechanism
@@ -62,7 +66,13 @@ from saas_os.core.audit_identity.plan import (
     expiry_report,
     hold_set_digest,
     reference_set_digest,
+    tenant_scope,
 )
+from saas_os.core.audit_log.subject_models import (
+    TenantAuditSubjectErasure,
+    TenantAuditSubjectLink,
+)
+from saas_os.core.audit_log.subjects import TENANT_HOLDS_LOCK_NAMESPACE, tenant_holds_lock_key
 from saas_os.core.platform_authority import (
     PlatformAuditOutcome,
     PlatformRefusalError,
@@ -80,7 +90,13 @@ from saas_os.core.platform_authority.subjects import (
     PLATFORM_HOLDS_LOCK_KEY,
     PLATFORM_HOLDS_LOCK_NAMESPACE,
 )
-from saas_os.infra.db import Session, acquire_global_advisory_lock, delete
+from saas_os.infra.db import (
+    Session,
+    acquire_global_advisory_lock,
+    bind_tenant_scope,
+    delete,
+    select,
+)
 from saas_os.infra.db.migrations_role import migrations_role_session_scope
 
 logger = logging.getLogger(__name__)
@@ -173,8 +189,8 @@ def _record_denied(caller: object, code: str) -> None:
 def _matches(plan: AuditIdentityPlan, confirmation: ExpiryConfirmation) -> bool:
     return (
         confirmation.rows == len(plan.delete_refs)
-        and confirmation.digest == reference_set_digest(PLATFORM_SCOPE, plan.delete_refs)
-        and confirmation.holds == hold_set_digest(PLATFORM_SCOPE, plan.active_holds)
+        and confirmation.digest == reference_set_digest(plan.scope, plan.delete_refs)
+        and confirmation.holds == hold_set_digest(plan.scope, plan.active_holds)
         and confirmation.unlinks == len(plan.unlink_refs)
         and confirmation.markers == len(plan.marker_users)
     )
@@ -216,20 +232,117 @@ def _apply(session: Session, plan: AuditIdentityPlan) -> None:
             raise RuntimeError("The markers changed under the run; rolled back.")
 
 
+def _apply_tenant(session: Session, plan: AuditIdentityPlan, tenant_id: uuid.UUID) -> None:
+    """`_apply` for one tenant, in a transaction bound to it; every statement
+    also names the tenant."""
+    if plan.delete_refs:
+        deleted = (
+            session.execute(
+                delete(TenantAuditSubjectLink)
+                .where(
+                    TenantAuditSubjectLink.tenant_id == tenant_id,
+                    TenantAuditSubjectLink.subject_ref.in_(plan.delete_refs),
+                )
+                .returning(TenantAuditSubjectLink.subject_ref)
+            )
+            .scalars()
+            .all()
+        )
+        if sorted(deleted) != sorted(plan.delete_refs):
+            raise RuntimeError("The links changed under the run; rolled back.")
+    unlinked_at = plan.as_of
+    for reference in plan.unlink_refs:
+        link = session.execute(
+            select(TenantAuditSubjectLink).where(
+                TenantAuditSubjectLink.tenant_id == tenant_id,
+                TenantAuditSubjectLink.subject_ref == reference,
+            )
+        ).scalar_one_or_none()
+        if link is None or link.user_id is None:
+            raise RuntimeError("The links changed under the run; rolled back.")
+        link.user_id = None
+        link.unlinked_at = unlinked_at
+        link.unlink_reason = _UNLINK_REASON_ERASURE
+    session.flush()
+    if plan.marker_users:
+        removed = (
+            session.execute(
+                delete(TenantAuditSubjectErasure)
+                .where(
+                    TenantAuditSubjectErasure.tenant_id == tenant_id,
+                    TenantAuditSubjectErasure.user_id.in_(plan.marker_users),
+                )
+                .returning(TenantAuditSubjectErasure.user_id)
+            )
+            .scalars()
+            .all()
+        )
+        if sorted(removed) != sorted(plan.marker_users):
+            raise RuntimeError("The markers changed under the run; rolled back.")
+
+
+def _lock_scope_holds(session: Session, tenant_id: uuid.UUID | None) -> None:
+    if tenant_id is None:
+        acquire_global_advisory_lock(
+            session, PLATFORM_HOLDS_LOCK_NAMESPACE, PLATFORM_HOLDS_LOCK_KEY, shared=True
+        )
+    else:
+        acquire_global_advisory_lock(
+            session, TENANT_HOLDS_LOCK_NAMESPACE, tenant_holds_lock_key(tenant_id), shared=True
+        )
+
+
+def _scope_report(session: Session, tenant_id: uuid.UUID | None) -> AuditIdentityExpiryReport:
+    if tenant_id is None:
+        return expiry_report(audit_identity_expiry_plan(session, lock=False))
+    with bind_tenant_scope(session, tenant_id):
+        return expiry_report(audit_identity_expiry_plan(session, lock=False, tenant_id=tenant_id))
+
+
+def _scope_apply(
+    session: Session,
+    tenant_id: uuid.UUID | None,
+    checked: ExpiryConfirmation,
+    run_id: uuid.UUID,
+) -> AuditIdentityExpiryReport:
+    """The scope's transaction: `H` shared, the plan under row locks, the
+    confirmation check, the changes. A tenant's rows are read and changed
+    with the tenant bound; the caller writes the platform row afterwards,
+    with no tenant bound."""
+    _lock_scope_holds(session, tenant_id)
+    if tenant_id is None:
+        plan = audit_identity_expiry_plan(session, lock=True)
+        if not _matches(plan, checked):
+            raise AuditIdentityExpiryConfirmationMismatchError()
+        _apply(session, plan)
+    else:
+        with bind_tenant_scope(session, tenant_id):
+            plan = audit_identity_expiry_plan(session, lock=True, tenant_id=tenant_id)
+            if not _matches(plan, checked):
+                raise AuditIdentityExpiryConfirmationMismatchError()
+            _apply_tenant(session, plan, tenant_id)
+    return expiry_report(plan, applied=True, run_id=run_id)
+
+
 def expire_audit_identity_links(
     *,
     caller: object,
     reason: str,
     apply: bool = False,
     confirmation: ExpiryConfirmation | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> AuditIdentityExpiryReport:
     """Report (default) or -- once `_APPLY_ENABLED` is set, which it is not
     (owner decision O9) -- with `apply` and a matching confirmation, expire
-    the platform scope's links and markers. Module docstring: the
-    migrations role only; the declared operator must hold
+    the links and markers of the platform scope (`tenant_id` `None`) or of
+    one tenant (phase P3c; its rows read and changed with the tenant bound,
+    its plan refused while a phase P3b index is missing or invalid). Module
+    docstring: the migrations role only; the declared operator must hold
     `platform.security_retention:report`."""
     try:
         checked = _validated_confirmation(apply, confirmation)
+        if tenant_id is not None and not isinstance(tenant_id, uuid.UUID):
+            raise InvalidAuditIdentityRequestError("tenant_id must be a uuid.UUID.")
         reason = validate_reason(reason)
         if apply and not _APPLY_ENABLED:
             # Refused before any connection (owner decision O9).
@@ -240,10 +353,11 @@ def expire_audit_identity_links(
         _record_denied(caller, refused.code)
         raise
     try:
+        scope = PLATFORM_SCOPE if tenant_id is None else tenant_scope(tenant_id)
         if checked is None:
             with migrations_role_session_scope(owned_table=LINKS_TABLE) as session:
                 authorize_platform_caller(caller, session=session, operation=AUDIT_IDENTITY_EXPIRY)
-                return expiry_report(audit_identity_expiry_plan(session, lock=False))
+                return _scope_report(session, tenant_id)
         run_id = uuid.uuid4()
         with migrations_role_session_scope(owned_table=LINKS_TABLE) as session:
             authorize_platform_caller(caller, session=session, operation=AUDIT_IDENTITY_EXPIRY)
@@ -251,19 +365,13 @@ def expire_audit_identity_links(
                 session,
                 caller,
                 reason,
-                {"phase": "start", "scopes": [PLATFORM_SCOPE], **_confirmed(checked)},
+                {"phase": "start", "scopes": [scope], **_confirmed(checked)},
                 entry_id=run_id,
             )
         with migrations_role_session_scope(owned_table=LINKS_TABLE) as session:
             authorize_platform_caller(caller, session=session, operation=AUDIT_IDENTITY_EXPIRY)
-            acquire_global_advisory_lock(
-                session, PLATFORM_HOLDS_LOCK_NAMESPACE, PLATFORM_HOLDS_LOCK_KEY, shared=True
-            )
-            plan = audit_identity_expiry_plan(session, lock=True)
-            if not _matches(plan, checked):
-                raise AuditIdentityExpiryConfirmationMismatchError()
-            _apply(session, plan)
-            report = expiry_report(plan, applied=True, run_id=run_id)
+            report = _scope_apply(session, tenant_id, checked, run_id)
+            # With no tenant bound (ADR-0045 section 9c).
             _record(session, caller, reason, {"phase": "scope", **_evidence(run_id, report)})
         with migrations_role_session_scope(owned_table=LINKS_TABLE) as session:
             _record(

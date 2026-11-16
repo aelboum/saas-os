@@ -1,5 +1,5 @@
-"""Audit identity retention, phase P2: legal holds on platform audit
-references and the expiry of links and erasure markers
+"""Audit identity retention, phases P2 and P3c: legal holds on platform and
+tenant audit references and the expiry of links and erasure markers
 (docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md sections
 4.8 to 4.11). Not imported here: the report job
 (`saas_os.core.audit_identity.jobs`; registering a job needs `REDIS_URL`)
@@ -16,6 +16,8 @@ from saas_os.core.audit_identity.errors import (
     AuditIdentityHoldAlreadyActiveError,
     AuditIdentityHoldAlreadyReleasedError,
     AuditIdentityHoldNotFoundError,
+    AuditIdentityHoldTenantNotFoundError,
+    AuditIdentityIndexUnavailableError,
     AuditIdentityRetentionError,
     AuditIdentitySessionEvidenceError,
     InvalidAuditIdentityRequestError,
@@ -44,7 +46,9 @@ __all__ = [
     "AuditIdentityHoldAlreadyReleasedError",
     "AuditIdentityHoldNotFoundError",
     "AuditIdentityHoldPage",
+    "AuditIdentityHoldTenantNotFoundError",
     "AuditIdentityHoldView",
+    "AuditIdentityIndexUnavailableError",
     "AuditIdentityRetentionError",
     "AuditIdentitySessionEvidenceError",
     "InvalidAuditIdentityRequestError",

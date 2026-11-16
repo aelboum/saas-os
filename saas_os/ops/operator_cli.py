@@ -26,7 +26,7 @@ for purge, erasure, move and delete").
         --reference LEGAL-2026-014 --reason "TICKET-7: litigation hold"
     saas-os-operator hold-audit-identity --operator <user id> --reference LEGAL-2026-014 \\
         [--from-day 2026-01-01] [--to-day 2026-06-30] [--subject-ref <reference>] \\
-        --reason "TICKET-8: litigation hold"
+        [--tenant <tenant id>] --reason "TICKET-8: litigation hold"
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -103,10 +103,12 @@ decided here:
   OIDC session's user, never a declared `--operator`. The former
   `release-permission-grant-ledger-hold` is removed.
 - `hold-audit-identity` is `saas_os.core.audit_identity.place_audit_identity_hold`
-  (audit identity phase P2; Core requires
-  `platform.security_retention_hold:manage`): a legal hold on platform audit
-  references, optionally one UTC day range and one reference, so the expiry
-  command and identity erasure keep them. One platform audit row. **Place
+  (audit identity phases P2 and P3c; Core requires
+  `platform.security_retention_hold:manage`): a legal hold on the platform
+  scope's audit references or, with `--tenant`, on one tenant's,
+  optionally one UTC day range and one reference, so the expiry command and
+  identity erasure keep them. One platform audit row (and, for a tenant, one
+  row in the tenant's own audit trail). **Place
   only** (owner decision O8): releasing such a hold is the authenticated
   route `POST /platform/audit-identity/holds/{hold_id}/release`, never a
   command.
@@ -481,8 +483,9 @@ def _day(raw: str | None, *, field: str) -> date | None:
 
 
 def hold_audit_identity(args: argparse.Namespace) -> object:
-    """Place a legal hold on platform audit references (audit identity P2).
-    Place only: no command releases one (owner decision O8)."""
+    """Place a legal hold on the platform scope's audit references (audit
+    identity P2) or, with `--tenant`, on one tenant's (P3c). Place only: no
+    command releases one (owner decision O8)."""
     from saas_os.core.audit_identity import place_audit_identity_hold
 
     caller = UserCaller(_uuid(args.operator, field="--operator"))
@@ -495,6 +498,7 @@ def hold_audit_identity(args: argparse.Namespace) -> object:
         ),
         caller=caller,
         reason=_reason(args.reason),
+        tenant_id=_uuid(args.tenant, field="--tenant") if args.tenant is not None else None,
     )
     return {
         "hold_id": result.hold_id,
@@ -648,6 +652,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from-day", help="first UTC day covered (YYYY-MM-DD); default open")
     p.add_argument("--to-day", help="last UTC day covered (YYYY-MM-DD); default open")
     p.add_argument("--subject-ref", help="one audit subject reference; default every subject")
+    p.add_argument(
+        "--tenant", help="the tenant whose audit references to hold; default the platform scope"
+    )
     p.add_argument("--reason", required=True)
     common(p)
 
