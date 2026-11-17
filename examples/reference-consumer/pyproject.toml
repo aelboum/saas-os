@@ -10,7 +10,17 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # a2a9384 is `main` after pull request #267 (2026-11-14), released as
+    # fb842ff is `main` after pull request #280 (2026-11-16), released as
+    # v0.14.0 (CHANGELOG.md). Since a2a9384 (#268-#280): four migrations
+    # (head e1f5a8c3b7d9), tenant audit rows record a user initiator as a
+    # reference, legal holds on audit references and the expiry report.
+    # `saas-os-update check`: REVIEW_REQUIRED (27 commits, 90 changed paths;
+    # architecture, authorization, dependency toolchain, documentation,
+    # internal, migration, public API, tenant RLS, tests and unknown); the
+    # paths are listed in docs/P-ROADMAP.md. The pinned-SHA install and
+    # import were checked for this move on 2026-11-17; the tests were not
+    # rerun (same place).
+    # Before it, a2a9384 is `main` after pull request #267 (2026-11-14), released as
     # v0.13.0 (CHANGELOG.md). Since c17c7b4 (#262-#267): one migration (head
     # e8a3c6f1d9b4), the monthly AI usage route and the opt-in AI attempt
     # retention and rollup expiry job.
@@ -18,7 +28,7 @@ dependencies = [
     # architecture, dependency toolchain, documentation, migration, provider
     # boundary, public API and tests); the paths are listed in
     # docs/P-ROADMAP.md. The pinned-SHA install and import were checked for
-    # this move on 2026-11-16; the tests were not rerun (same place).
+    # that move on 2026-11-16; the tests were not rerun (same place).
     # Before it, c17c7b4 is `main` after pull request #261 (2026-11-13), released as
     # v0.12.0 (CHANGELOG.md). Since 2158a81 (#255-#261): no migration (head
     # c7d2a9f4e1b6), directly queued jobs no longer retry permanent errors or
@@ -211,5 +221,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@a2a9384fc6d6cfc9202d00750801527261173bdf",
+    "saas-os @ git+https://github.com/aelboum/saas-os@fb842fff4b2b24a3a4bf25f3000aedae46dce5aa",
 ]

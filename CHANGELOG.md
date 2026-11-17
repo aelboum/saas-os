@@ -2,9 +2,53 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.15.0 (2026-11-17)
+
+The merge commit of pull request #287, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.15.0` resolves to that merge commit before pinning it, and with `git tag -v v0.15.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.14.0: `fb842fff4b2b24a3a4bf25f3000aedae46dce5aa`.
+
+It contains everything since v0.14.0 (`fb842ff`): pull requests #281 to #286 and this release. The main change is a public Python API for a tenant's own AI settings (Gap 20 Stage 8, issue #285). There is **no migration** (the head stays `e1f5a8c3b7d9`), no new setting and no new permission. A minor release, not a patch: it adds a public package (ADR-0015, version numbers before 1.0).
+
+**Support:** 0.15 is fully supported. 0.14 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
+
+**Deployment steps (details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.14.0 to v0.15.0"):** none required. Move the pin. AI stays off for every tenant until a user of that tenant enables it.
+
+**Added: `saas_os.inference.settings`** (#286; ADR-0054 amendment of 2026-11-17, `docs/architecture/AI-INFERENCE-CONTRACTS.md` section 7.8). A thin public facade over the tenant's own AI settings, which a product could not change before. Nine functions, each taking `caller`:
+
+- `set_tenant_ai_policy`, `grant_use_case`, `grant_destination`, `set_destination_rank` and `set_tenant_ai_preferences` (permission `ai.policy:manage`, users and service accounts);
+- `read_tenant_ai_policy` and `list_eligible_models` (`ai.policy:read`);
+- `set_tenant_budget_cap` (`ai.budget:manage`, users only);
+- `read_tenant_budget` (`ai.usage:read`, users only, audited as `ai.budget.read`).
+
+Every guarantee of the internal functions is kept, because the facade only delegates:
+
+- each change writes its audit row in the same transaction;
+- support access can read the policy and eligibility but never writes and never reads the budget;
+- a destination the installation's policy or the tenant's preferences rule out is refused at grant time;
+- a platform AI hold still refuses inference after a tenant re-enables AI;
+- row-level security is unchanged.
+
+Platform operations (providers, models, aliases, trust, prices, plan budgets, holds) stay operator-only and are not exported. An architecture test pins the facade's function list, signatures and delegates. The reference consumer gains `reference_consumer/ai_settings.py`, tested end to end against the fake adapter with public imports only.
+
+**Changed: four system jobs run off the worker's event loop** (#283, #284). The audit digest job, `_cleanup_expired_sessions_job`, `_purge_expired_ai_attempts_job` and `_report_audit_identity_expiry_job` now run their synchronous database work in a thread through the private helper `saas_os.infra.jobs.single_flight.run_in_thread_once`, one run at a time per worker process. Before, a long run stalled every other job of the worker: measured, about 93 s for a first digest over 6124 tenants. An overlapping run is skipped and logged with `reason` `previous_run_in_progress`. A run cancelled by the handler timeout keeps its thread until it ends. The work itself is unchanged, and two worker processes may still run a job at once.
+
+**Public API:** additions only. No line of `tests/architecture/public_api_snapshot.txt` is changed or removed since v0.14.0; the 20 added lines are the package `saas_os.inference.settings` (nine functions, eleven re-exported types).
+
+**Tests only:** #282 (each integration module's dead-letter list is now its own; an AI deadline test gets a wider margin).
+
+**Documentation only:** #281 (v0.14.0 recorded as published).
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with #286 (the new package in the explicit package list) and with this release (the version).
+
+**Known limits:**
+
+- no HTTP router for the tenant settings: a product writes its own routes, and an opt-in router is a separate, later decision;
+- `tenant_budget_status` stays internal.
+
+The example pins move to v0.14.0 (`fb842ff`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `fb842ff` (v0.14.0)"). The reference consumer's `ai_settings.py` needs this release and cannot run against that pin. Migration head: `e1f5a8c3b7d9`. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.14.0 to v0.15.0".
+
 ## v0.14.0 (2026-11-16)
 
-The merge commit of pull request #280, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.14.0` resolves to that merge commit before pinning it, and with `git tag -v v0.14.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.13.0: `a2a9384fc6d6cfc9202d00750801527261173bdf`.
+Commit `fb842fff4b2b24a3a4bf25f3000aedae46dce5aa`, the merge commit of pull request #280, the release pull request (ADR-0015, "One pull request per release"). Main CI run 43935355616 passed on this commit. Check that the tag `v0.14.0` resolves to that SHA before pinning it, and with `git tag -v v0.14.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.13.0: `a2a9384fc6d6cfc9202d00750801527261173bdf`.
 
 It contains everything since v0.13.0 (`a2a9384`): pull requests #268 to #279 and this release, which are audit identity phases P2 and P3 (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, `docs/architecture/AUDIT-IDENTITY-P3-PLAN.md`). There are **four migrations** (the head moves from `e8a3c6f1d9b4` to `e1f5a8c3b7d9`), one of which builds two indexes on `core.audit_log` with `CREATE INDEX CONCURRENTLY`. **Tenant audit rows change shape**: a user who initiates a tenant action is now recorded as a reference, not as a user id. There is no new setting and no new permission. A minor release, not a patch: it adds migrations, HTTP routes, public functions and a changed audit row shape (ADR-0015, version numbers before 1.0).
 
