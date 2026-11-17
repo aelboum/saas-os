@@ -19,7 +19,7 @@ import pytest
 
 from saas_os.core.audit_digest import jobs as digest_jobs
 from saas_os.core.audit_digest.service import DigestRun
-from saas_os.infra.jobs import SystemJobContext
+from saas_os.infra.jobs import SystemJobContext, single_flight
 
 pytestmark = pytest.mark.anyio
 
@@ -31,7 +31,7 @@ def anyio_backend() -> str:
 
 @pytest.fixture(autouse=True)
 def _no_run_in_progress(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(digest_jobs, "_running", None)
+    monkeypatch.setattr(single_flight, "_running", {})
     yield
 
 
@@ -136,8 +136,7 @@ async def test_a_cancelled_run_keeps_its_thread_and_no_second_run_starts_beside_
     assert calls == 1 and not finished.is_set()
 
     release.set()
-    running = digest_jobs._running
-    assert running is not None
+    running = single_flight._running["audit_digest_cycle"]
     await running
     assert finished.is_set()
     await digest_jobs._audit_digest_cycle(SystemJobContext())

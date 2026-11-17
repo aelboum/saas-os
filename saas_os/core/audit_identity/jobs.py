@@ -30,6 +30,7 @@ from saas_os.core.audit_identity.plan import (
     tenant_audit_identity_expiry_report,
 )
 from saas_os.infra.jobs import SystemJobContext, register_system_job
+from saas_os.infra.jobs.single_flight import run_in_thread_once
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,19 @@ async def _report_audit_identity_expiry_job(context: SystemJobContext) -> None:
     with nothing to report and no active hold is not logged. While a phase
     P3b index is missing or invalid, no tenant is planned: the job logs
     `audit_identity_expiry_report_refused` with the index and raises, so the
-    failure is visible to the queue."""
+    failure is visible to the queue.
+
+    The walk is synchronous database work, so it runs in a thread, one run
+    at a time per worker process (`saas_os.infra.jobs.single_flight`): a
+    run that starts while the previous one is still in its thread is
+    skipped and logged."""
+    if not await run_in_thread_once("audit_identity_expiry_report", _report_once):
+        logger.info(
+            "audit_identity_expiry_report_skipped", extra={"reason": "previous_run_in_progress"}
+        )
+
+
+def _report_once() -> None:
     _log(audit_identity_expiry_report())
     for tenant_id in all_tenant_ids():
         try:
