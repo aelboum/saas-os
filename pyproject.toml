@@ -279,6 +279,7 @@ packages = [
     "saas_os.core.usage",
     "saas_os.core.webhooks",
     "saas_os.inference",
+    "saas_os.inference.settings",
     "saas_os.infra",
     "saas_os.infra.db",
     "saas_os.infra.db.backup",

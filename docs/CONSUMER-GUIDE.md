@@ -679,10 +679,26 @@ What must be true for a call to be sent, and who makes it true:
 |---|---|
 | The provider's secret listed in `AI_PROVIDER_CREDENTIALS` (comma-separated secret names provisioned for AI provider use) and injected like any other secret. A name not listed is refused, even if it resolves | Deployment (whoever controls the environment) |
 | A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`, run with `PLATFORM_CONFIG_DATABASE_URL`, section 5); after a change of credential name or endpoint origin, `ai-provider-confirm-binding` | Platform operator |
-| The tenant's AI policy enabled; the use case granted for the classification; the model granted as a destination; optional preferences (residency, retention, training use) | Tenant, with `ai.policy:manage` |
+| The tenant's AI policy enabled; the use case granted for the classification; the model granted as a destination; optional preferences (residency, retention, training use) | Tenant, with `ai.policy:manage`, through your routes calling `saas_os.inference.settings` |
 | The caller holds `ai.inference:run` in the tenant (support access never does) | Tenant RBAC |
 | The plan grants the boolean entitlement `ai.inference`; optionally a monthly `ai.tokens` limit (soft) | Billing plan |
 | Every content part carries its classification (`none`, `tenant_data`, `sensitive`) | Product |
+
+AI is off for every tenant until a user of that tenant turns it on. Your
+product's settings routes do that with `saas_os.inference.settings`
+(`docs/architecture/AI-INFERENCE-CONTRACTS.md` section 7.8; tested example
+`examples/reference-consumer/reference_consumer/ai_settings.py`, end-to-end
+test `tests/test_reference_consumer_ai_settings_integration.py`):
+`set_tenant_ai_policy`, `grant_use_case`, `grant_destination`,
+`set_destination_rank` and `set_tenant_ai_preferences` under
+`ai.policy:manage`; `read_tenant_ai_policy` and `list_eligible_models` (which
+models the tenant may choose, and why not) under `ai.policy:read`;
+`set_tenant_budget_cap` under `ai.budget:manage` and `read_tenant_budget`
+under `ai.usage:read`, users only. Each change writes a tenant audit row;
+support access never makes one. The functions are synchronous: call them from
+an async route in a thread. SaaS OS defines no route for them and grants
+these permissions to no role. Platform settings (providers, models, aliases,
+installation policy, plan budgets, holds) stay with the operator commands.
 
 Every refusal is a typed `InferenceError` with a category and no content.
 Each attempt is recorded before anything is sent; the output comes back only
@@ -1019,6 +1035,14 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 5. **Public API.** Additions only: no line of `tests/architecture/public_api_snapshot.txt` changed or was removed since v0.13.0. New: `saas_os.core.audit_identity`, `saas_os.core.audit_log.AuditSubjectLinkUnavailableError`, `saas_os.core.platform_authority.successful_event_target_tenant`, and `saas_os.infra.db.json_text_at`, `max_` and `index_is_valid`.
 6. **Check the tag's signature** before pinning: `git tag -v v0.14.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 7. **Rolling back** to v0.13.0: plan it as forward-only once the new code has run. The downgrades of `e1f5a8c3b7d9`, `d4f8b2e6a9c1` and `b6d2f8a4c1e7` lose no data (dropping the indexes takes an ACCESS EXCLUSIVE lock on `core.audit_log` until the run commits), but the downgrade of `c7e3a9f2b4d8` refuses while any tenant reference, erasure marker or hold exists, which is the case as soon as a user initiates a tenant action. Audit rows written meanwhile keep their references.
+
+### From v0.14.0 to the next release (not yet released)
+
+Written with the change (issue #285, Gap 20 Stage 8); the release pull request gives this section its version and the `saas-os-update check` result.
+
+1. **No migration, no new permission, no configuration.** Nothing changes for a tenant on upgrade: AI stays off for every tenant until a user of that tenant enables it.
+2. **New public package `saas_os.inference.settings`** (additions only to `tests/architecture/public_api_snapshot.txt`): a tenant's own AI settings, which a product could not change before (every `run_inference` call was refused at the tenant policy step). To offer AI, add settings routes in your product that call it, gated by your own route policy, and grant `ai.policy:manage`, `ai.policy:read`, `ai.budget:manage` and `ai.usage:read` to the roles that should hold them (`register_ai_permissions()` registers them). Section 12a lists the functions; `docs/architecture/AI-INFERENCE-CONTRACTS.md` section 7.8 has the contract.
+3. **Still not importable:** `saas_os.control_plane.inference` (import-linter refuses it in a product), and through `saas_os.inference.settings` no platform operation and no `tenant_budget_status`.
 
 ## 15. Product deployment checklist
 

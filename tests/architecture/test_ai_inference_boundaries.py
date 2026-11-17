@@ -102,6 +102,16 @@ def test_ai_inference_contracts_are_kept() -> None:
             FACADE_CONTRACT,
         ),
         (
+            REPO_ROOT / "saas_os" / "core" / "__init__.py",
+            b"\nimport saas_os.inference.settings\n",
+            FACADE_CONTRACT,
+        ),
+        (
+            REPO_ROOT / "saas_os" / "api" / "__init__.py",
+            b"\nimport saas_os.inference.settings\n",
+            FACADE_CONTRACT,
+        ),
+        (
             REPO_ROOT / "saas_os" / "ops" / "__init__.py",
             b"\nimport saas_os.control_plane.inference.adapters\n",
             OPS_CONTRACT,
@@ -253,6 +263,166 @@ def test_the_facade_exposes_no_runtime_or_configuration_seam() -> None:
         assert list(parameters) == ["caller", "tenant_id", "request"], name
     configuration = ("create_", "set_", "update_", "confirm_", "revoke_", "read_ai", "grant_")
     assert not any(name.startswith(configuration) for name in facade.__all__)
+
+
+# --- `saas_os.inference.settings` (ADR-0054 section 3a, amendment of 2026-11-17;
+# Gap 20 decision 1 (H3); issue #285) -------------------------------------------
+
+SETTINGS = REPO_ROOT / "saas_os" / "inference" / "settings" / "__init__.py"
+
+_SETTINGS_SOURCES = {
+    "saas_os.control_plane.inference",
+    "saas_os.control_plane.inference.budget",
+    "saas_os.control_plane.inference.budget_admin",
+    "saas_os.control_plane.inference.config",
+    "saas_os.control_plane.inference.config.errors",
+    "saas_os.control_plane.inference.config.tenant_policy",
+    "saas_os.control_plane.inference.eligibility",
+}
+
+# Each public function, the internal module it delegates to, and its exact
+# parameters. Pinned so that no parameter can be added that the internal
+# function does not check (the test seams `plans` of `read_tenant_budget` and
+# `adapter_capabilities` of `list_eligible_models` stay internal).
+_SETTINGS_FUNCTIONS = {
+    "set_tenant_ai_policy": ("_tenant_policy", ["tenant_id", "enabled", "caller"]),
+    "grant_use_case": (
+        "_tenant_policy",
+        ["tenant_id", "use_case", "classifications", "enabled", "caller"],
+    ),
+    "grant_destination": (
+        "_tenant_policy",
+        [
+            "tenant_id",
+            "use_case",
+            "provider_key",
+            "model_id",
+            "classifications",
+            "enabled",
+            "caller",
+        ],
+    ),
+    "set_destination_rank": (
+        "_tenant_policy",
+        ["tenant_id", "use_case", "provider_key", "model_id", "rank", "caller"],
+    ),
+    "set_tenant_ai_preferences": (
+        "_tenant_policy",
+        ["tenant_id", "allowed_residency", "max_retention_days", "exclude_training_use", "caller"],
+    ),
+    "read_tenant_ai_policy": ("_tenant_policy", ["tenant_id", "caller"]),
+    "list_eligible_models": (
+        "_eligibility",
+        ["tenant_id", "use_case", "caller", "alias", "classification"],
+    ),
+    "set_tenant_budget_cap": (
+        "_budget_admin",
+        ["tenant_id", "currency", "amount", "caller", "warn_thresholds"],
+    ),
+    "read_tenant_budget": ("_budget_admin", ["tenant_id", "caller"]),
+}
+
+_SETTINGS_TYPES = {
+    "AIBudgetError",
+    "AIConfigurationNotFoundError",
+    "AITenantPolicyError",
+    "BudgetState",
+    "BudgetStatus",
+    "DestinationGrantView",
+    "EligibleModelView",
+    "TenantAIPolicyView",
+    "TenantAIPreferencesView",
+    "TenantBudgetCapView",
+    "UseCaseGrantView",
+}
+
+# Platform operations stay operator-only (issue #285, "Out of scope"), and a
+# read without an authorization of its own stays internal.
+_NOT_PUBLIC = {
+    "create_provider",
+    "create_model",
+    "set_alias",
+    "set_destination_policy",
+    "create_trust_entry",
+    "revoke_trust_entry",
+    "set_provider_data_handling",
+    "set_model_price",
+    "confirm_model_price",
+    "set_plan_budget",
+    "set_tenant_budget_override",
+    "clear_tenant_budget_override",
+    "release_budget_reservation",
+    "set_tenant_ai_hold",
+    "release_tenant_ai_hold",
+    "read_tenant_ai_hold",
+    "tenant_budget_status",
+    "load_tenant_ai_policy",
+}
+
+
+def test_a_product_may_use_the_settings_interface() -> None:
+    """Positive control: a product importing the settings facade keeps
+    every contract, although the facade reaches the internals."""
+    target = REPO_ROOT / "products" / "__init__.py"
+    original = target.read_bytes()
+    try:
+        target.write_bytes(original + b"\nimport saas_os.inference.settings\n")
+        result = _run_import_linter()
+        assert result.returncode == 0, result.stdout
+    finally:
+        target.write_bytes(original)
+    assert _run_import_linter().returncode == 0
+
+
+def test_the_settings_interface_is_a_thin_facade() -> None:
+    """Each function is one delegating call to the internal function of the
+    same name, passing every parameter on unchanged; no class, no other
+    statement, no import outside the tenant settings internals."""
+    tree = ast.parse(SETTINGS.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module and node.module != "__future__":
+            imported.add(node.module)
+        elif isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        assert not isinstance(node, ast.ClassDef), node.name
+    assert imported - {"uuid", "collections.abc", "decimal"} <= _SETTINGS_SOURCES, imported
+    functions = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)]
+    assert {f.name for f in functions} == set(_SETTINGS_FUNCTIONS)
+    for function in functions:
+        assert isinstance(function, ast.FunctionDef), function.name  # synchronous, as internally
+        module, parameters = _SETTINGS_FUNCTIONS[function.name]
+        body = [
+            s
+            for s in function.body
+            if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+        ]
+        assert len(body) == 1, function.name
+        statement = body[0]
+        assert isinstance(statement, ast.Return), function.name
+        call = statement.value
+        assert isinstance(call, ast.Call), function.name
+        target = call.func
+        assert isinstance(target, ast.Attribute) and target.attr == function.name, function.name
+        assert isinstance(target.value, ast.Name) and target.value.id == module, function.name
+        assert [a.id for a in call.args if isinstance(a, ast.Name)] == ["tenant_id"]
+        assert len(call.args) == 1, function.name
+        assert [k.arg for k in call.keywords] == parameters[1:], function.name
+        assert all(isinstance(k.value, ast.Name) and k.value.id == k.arg for k in call.keywords), (
+            function.name
+        )
+
+
+def test_the_settings_interface_has_exactly_its_tenant_functions() -> None:
+    import inspect
+
+    import saas_os.inference.settings as settings
+
+    assert set(settings.__all__) == set(_SETTINGS_FUNCTIONS) | _SETTINGS_TYPES
+    for name, (_, parameters) in _SETTINGS_FUNCTIONS.items():
+        assert list(inspect.signature(getattr(settings, name)).parameters) == parameters, name
+    assert not (set(dir(settings)) & _NOT_PUBLIC)
+    assert not any("hold" in name or "override" in name for name in settings.__all__)
 
 
 _NETWORK_ROOTS = {"httpx", "httpcore", "socket", "ssl", "urllib", "http", "aiohttp", "requests"}

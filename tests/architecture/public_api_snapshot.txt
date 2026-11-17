@@ -1058,6 +1058,26 @@ saas_os.inference.register_ai_permissions = "def register_ai_permissions() -> No
 saas_os.inference.register_use_case = "def register_use_case(use_case: UseCase) -> UseCase"
 saas_os.inference.run_inference = "async def run_inference(caller: object, *, tenant_id: uuid.UUID, request: InferenceRequest) -> InferenceResult"
 saas_os.inference.stream_inference = "async def stream_inference(caller: object, *, tenant_id: uuid.UUID, request: InferenceRequest) -> None"
+saas_os.inference.settings.AIBudgetError = {"class": "class AIBudgetError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.inference.settings.AIConfigurationNotFoundError = {"class": "class AIConfigurationNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, kind: str) -> None"}}
+saas_os.inference.settings.AITenantPolicyError = {"class": "class AITenantPolicyError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str, *, blocked_by: tuple[str, ...]=()) -> None"}}
+saas_os.inference.settings.BudgetState = {"class": "class BudgetState(enum.StrEnum)"}
+saas_os.inference.settings.BudgetStatus = {"class": "class BudgetStatus()", "fields": ["basis", "currency", "limit", "override_expires_at", "period_start", "remaining", "reserved", "retained", "settled", "source", "state", "threshold_reached", "warn_thresholds"]}
+saas_os.inference.settings.DestinationGrantView = {"class": "class DestinationGrantView()", "fields": ["classifications", "enabled", "model_id", "model_ref", "preference_rank", "provider_key", "use_case"]}  # pragma: allowlist secret
+saas_os.inference.settings.EligibleModelView = {"class": "class EligibleModelView()", "fields": ["blocked_by", "capabilities", "credential_bound", "data_handling", "eligible", "families", "granted", "lifecycle", "model_id", "preference_rank", "provider_key"]}  # pragma: allowlist secret
+saas_os.inference.settings.TenantAIPolicyView = {"class": "class TenantAIPolicyView()", "fields": ["destinations", "enabled", "exists", "preferences", "tenant_id", "use_cases", "version"]}
+saas_os.inference.settings.TenantAIPreferencesView = {"class": "class TenantAIPreferencesView()", "fields": ["allowed_residency", "exclude_training_use", "max_retention_days", "version"]}
+saas_os.inference.settings.TenantBudgetCapView = {"class": "class TenantBudgetCapView()", "fields": ["cap_amount", "currency", "tenant_id", "version", "warn_thresholds"]}
+saas_os.inference.settings.UseCaseGrantView = {"class": "class UseCaseGrantView()", "fields": ["classifications", "enabled", "use_case"]}
+saas_os.inference.settings.grant_destination = "def grant_destination(tenant_id: uuid.UUID, *, use_case: str, provider_key: str, model_id: str, classifications: Sequence[str], enabled: bool=True, caller: object) -> DestinationGrantView"  # pragma: allowlist secret
+saas_os.inference.settings.grant_use_case = "def grant_use_case(tenant_id: uuid.UUID, *, use_case: str, classifications: Sequence[str], enabled: bool=True, caller: object) -> UseCaseGrantView"
+saas_os.inference.settings.list_eligible_models = "def list_eligible_models(tenant_id: uuid.UUID, *, use_case: str, caller: object, alias: str | None=None, classification: str | None=None) -> tuple[EligibleModelView, ...]"
+saas_os.inference.settings.read_tenant_ai_policy = "def read_tenant_ai_policy(tenant_id: uuid.UUID, *, caller: object) -> TenantAIPolicyView"
+saas_os.inference.settings.read_tenant_budget = "def read_tenant_budget(tenant_id: uuid.UUID, *, caller: object) -> BudgetStatus"
+saas_os.inference.settings.set_destination_rank = "def set_destination_rank(tenant_id: uuid.UUID, *, use_case: str, provider_key: str, model_id: str, rank: int | None, caller: object) -> DestinationGrantView"  # pragma: allowlist secret
+saas_os.inference.settings.set_tenant_ai_policy = "def set_tenant_ai_policy(tenant_id: uuid.UUID, *, enabled: bool, caller: object) -> bool"
+saas_os.inference.settings.set_tenant_ai_preferences = "def set_tenant_ai_preferences(tenant_id: uuid.UUID, *, allowed_residency: Sequence[str]=(), max_retention_days: int | None=None, exclude_training_use: bool=False, caller: object) -> TenantAIPreferencesView"
+saas_os.inference.settings.set_tenant_budget_cap = "def set_tenant_budget_cap(tenant_id: uuid.UUID, *, currency: str, amount: Decimal | None, caller: object, warn_thresholds: Sequence[int] | None=None) -> TenantBudgetCapView"
 saas_os.infra.db.ApplicationRoleValidation = {"class": "class ApplicationRoleValidation()", "fields": ["role_name"]}
 saas_os.infra.db.Base = {"class": "class Base(DeclarativeBase)"}
 saas_os.infra.db.Boolean = "re-export of sqlalchemy.Boolean"
