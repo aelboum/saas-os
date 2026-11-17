@@ -479,7 +479,7 @@ Merged (PR #251, `67a0bac`); released in v0.11.0. Migration `c7d2a9f4e1b6`. Owne
 
 ### 7.8 Tenant AI settings: the public Python API (ADR-0054 section 3a, amendment of 2026-11-17; Gap 20, G20-5; issue #285)
 
-Implemented on `feat/ai-tenant-settings-api`; not merged, not released. `saas_os.inference.settings` is the supported product interface for a tenant's own AI settings (Gap 20 decision 1, H3). Products own their routes; SaaS OS has no route for these settings. Each function is one delegating call to the internal function of the same name, so its contract is the internal one, unchanged (sections 7.2 and 7.4, and section 8's "Tenant AI policy"). The functions are synchronous and open their own transaction; an async route calls them in a thread.
+Released in v0.15.0 (pull request #286 merged as `06f0a95`; release `cdede95`, published 2026-11-17). `saas_os.inference.settings` is the supported product interface for a tenant's own AI settings (Gap 20 decision 1, H3). Products own their routes; SaaS OS has no route for these settings. Each function is one delegating call to the internal function of the same name, so its contract is the internal one, unchanged (sections 7.2 and 7.4, and section 8's "Tenant AI policy"). The functions are synchronous and open their own transaction; an async route calls them in a thread.
 
 | Function | Purpose | Authority | Audit row (same transaction) |
 |---|---|---|---|
