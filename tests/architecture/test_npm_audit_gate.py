@@ -1,11 +1,13 @@
 """The frontend dependency-audit gate (`scripts/npm_audit_gate.py`) and its
 checked-in exceptions file (`scripts/security-exceptions.json`).
 
-The file is empty since 2026-10-23: its one entry, GHSA-vfj7-8cjw-p6xm in
-`braces`, was removed after GitHub withdrew the advisory
-(`docs/SECURITY-EXCEPTION-braces.md`, closed). The controls below keep
-exercising the exception mechanism with that former entry, written to a
-temporary file, so the gate's behavior for an exception stays proven.
+The file holds one entry since 2026-11-17: GHSA-fc5q-39xc-vjpf in
+`picomatch`, by decision of the repository owner, expiring 2026-12-17
+(`docs/SECURITY-EXCEPTION-picomatch.md`). Its only earlier entry,
+GHSA-vfj7-8cjw-p6xm in `braces`, was removed on 2026-10-23 after GitHub
+withdrew the advisory (`docs/SECURITY-EXCEPTION-braces.md`, closed). The
+general controls below exercise the mechanism with that former entry,
+written to a temporary file; the checked-in entry has its own controls.
 
 Positive control: the accepted advisory, under its conditions, passes.
 Negative controls: every way the exception must stop applying fails the
@@ -31,6 +33,7 @@ GATE_PATH = REPO_ROOT / "scripts" / "npm_audit_gate.py"
 EXCEPTIONS_PATH = REPO_ROOT / "scripts" / "security-exceptions.json"
 
 BRACES = "GHSA-vfj7-8cjw-p6xm"
+PICOMATCH = "GHSA-fc5q-39xc-vjpf"
 TODAY = dt.date(2026, 10, 11)
 
 
@@ -110,12 +113,86 @@ def exceptions(tmp_path: Path) -> list[Any]:
 # --- The checked-in exceptions file ---------------------------------------------------------
 
 
-def test_the_checked_in_exceptions_file_holds_no_exception() -> None:
-    """GHSA-vfj7-8cjw-p6xm was withdrawn on 2026-10-23 and its entry removed;
+# How `npm audit` reported picomatch on 2026-11-17: high, and the only fix it
+# offers is a major downgrade of vitest.
+_PICOMATCH_BREAKING_FIX = {"name": "vitest", "version": "3.1.4", "isSemVerMajor": True}
+_PICOMATCH_TODAY = ("picomatch", PICOMATCH, "high", _PICOMATCH_BREAKING_FIX)
+_PICOMATCH_APPROVED = dt.date(2026, 11, 17)
+_PICOMATCH_EXPIRES = dt.date(2026, 12, 17)
+
+
+def test_the_checked_in_exceptions_file_holds_exactly_the_picomatch_exception() -> None:
+    """One entry, approved by the owner on 2026-11-17, expiring 2026-12-17;
     nothing else is accepted."""
     document = json.loads(EXCEPTIONS_PATH.read_text(encoding="utf-8"))
-    assert document["npm"] == []
-    assert gate.load_exceptions(EXCEPTIONS_PATH) == []
+    assert [(e["id"], e["package"]) for e in document["npm"]] == [(PICOMATCH, "picomatch")]
+    (entry,) = document["npm"]
+    assert entry["approved_by"] == "repository owner"
+    assert entry["approved_on"] == _PICOMATCH_APPROVED.isoformat()
+    assert entry["expires"] == _PICOMATCH_EXPIRES.isoformat()
+    loaded = gate.load_exceptions(EXCEPTIONS_PATH)
+    assert [(e.id, e.package, e.expires) for e in loaded] == [
+        (PICOMATCH, "picomatch", _PICOMATCH_EXPIRES)
+    ]
+
+
+def test_the_picomatch_advisory_passes_while_development_only_and_not_fixed() -> None:
+    verdict = gate.evaluate(
+        _report(_PICOMATCH_TODAY),
+        _CLEAN,
+        gate.load_exceptions(EXCEPTIONS_PATH),
+        _PICOMATCH_APPROVED,
+    )
+    assert verdict.passed
+    assert PICOMATCH in verdict.accepted[0] and "NOT FIXED" in verdict.accepted[0]
+
+
+@pytest.mark.parametrize(
+    ("report", "production", "today", "reason"),
+    [
+        (_report(_PICOMATCH_TODAY), _CLEAN, dt.date(2026, 12, 18), "EXPIRED"),
+        (_report(_PICOMATCH_TODAY), _report(_PICOMATCH_TODAY), _PICOMATCH_APPROVED, "production"),
+        (
+            _report(("picomatch", PICOMATCH, "high", True)),
+            _CLEAN,
+            _PICOMATCH_APPROVED,
+            "non-breaking",
+        ),
+        (_CLEAN, _CLEAN, _PICOMATCH_APPROVED, "stale"),
+    ],
+    ids=["expired", "in-production", "fix-available", "withdrawn"],
+)
+def test_the_picomatch_exception_stops_applying_under_each_condition(
+    report: dict[str, Any], production: dict[str, Any], today: dt.date, reason: str
+) -> None:
+    verdict = gate.evaluate(report, production, gate.load_exceptions(EXCEPTIONS_PATH), today)
+    assert not verdict.passed
+    assert PICOMATCH in verdict.blocking[0] and reason in verdict.blocking[0]
+
+
+def test_the_picomatch_exception_does_not_cover_another_advisory_or_package() -> None:
+    exceptions = gate.load_exceptions(EXCEPTIONS_PATH)
+    other_advisory = _report(_PICOMATCH_TODAY)
+    other_advisory["vulnerabilities"]["picomatch"]["via"].append(
+        {
+            "source": 2,
+            "name": "picomatch",
+            "title": "another picomatch advisory",
+            "url": "https://github.com/advisories/GHSA-zzzz-yyyy-xxxx",
+            "severity": "high",
+        }
+    )
+    other_package = _report(_PICOMATCH_TODAY, ("micromatch", PICOMATCH, "high", False))
+    for report, blocked in (
+        (other_advisory, "GHSA-zzzz-yyyy-xxxx (picomatch"),
+        (other_package, f"{PICOMATCH} (micromatch"),
+    ):
+        verdict = gate.evaluate(report, _CLEAN, exceptions, _PICOMATCH_APPROVED)
+        assert not verdict.passed
+        assert len(verdict.blocking) == 1 and verdict.blocking[0].startswith(blocked)
+        assert len(verdict.accepted) == 1 and verdict.accepted[0].startswith(
+            f"{PICOMATCH} (picomatch"
+        )
 
 
 def test_with_the_checked_in_file_the_braces_advisory_would_fail_again() -> None:
