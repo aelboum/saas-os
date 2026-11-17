@@ -6,7 +6,7 @@ SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release")
 
 The merge commit of pull request #287, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.15.0` resolves to that merge commit before pinning it, and with `git tag -v v0.15.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.14.0: `fb842fff4b2b24a3a4bf25f3000aedae46dce5aa`.
 
-It contains everything since v0.14.0 (`fb842ff`): pull requests #281 to #286 and this release. The main change is a public Python API for a tenant's own AI settings (Gap 20 Stage 8, issue #285). There is **no migration** (the head stays `e1f5a8c3b7d9`), no new setting and no new permission. A minor release, not a patch: it adds a public package (ADR-0015, version numbers before 1.0).
+It contains everything since v0.14.0 (`fb842ff`): pull requests #281 to #286, #288 and this release. The main change is a public Python API for a tenant's own AI settings (Gap 20 Stage 8, issue #285). There is **no migration** (the head stays `e1f5a8c3b7d9`), no new setting and no new permission. A minor release, not a patch: it adds a public package (ADR-0015, version numbers before 1.0).
 
 **Support:** 0.15 is fully supported. 0.14 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
 
@@ -36,6 +36,8 @@ Platform operations (providers, models, aliases, trust, prices, plan budgets, ho
 **Tests only:** #282 (each integration module's dead-letter list is now its own; an AI deadline test gets a wider margin).
 
 **Documentation only:** #281 (v0.14.0 recorded as published).
+
+**Security gate:** #288 accepts the `picomatch` advisory GHSA-fc5q-39xc-vjpf (high, no patched release) as an exception until 2026-12-17, by decision of the repository owner. `picomatch` is reached only through the frontend's development dependencies; `npm audit --omit=dev` reports 0 vulnerabilities. Nothing that ships changes (`docs/SECURITY-EXCEPTION-picomatch.md`).
 
 **Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with #286 (the new package in the explicit package list) and with this release (the version).
 
