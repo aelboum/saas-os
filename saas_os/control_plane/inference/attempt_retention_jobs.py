@@ -23,26 +23,46 @@ import logging
 from arq.worker import Function
 
 from saas_os.control_plane.inference.attempt_retention import (
+    AIAttemptRetentionSettings,
     ai_attempt_retention_settings,
     purge_expired_ai_attempts,
 )
 from saas_os.control_plane.inference.usage_rollup_retention import (
+    AIUsageRollupRetentionSettings,
     ai_usage_rollup_retention_settings,
     expire_ai_usage_rollups,
 )
 from saas_os.core.authority import SystemActor, SystemCorrelation
 from saas_os.infra.jobs import SystemJobContext, register_system_job
+from saas_os.infra.jobs.single_flight import run_in_thread_once
 
 logger = logging.getLogger(__name__)
 
 
 async def _purge_expired_ai_attempts_job(context: SystemJobContext) -> None:
     """A system job (no payload): it walks every tenant itself, attempts
-    first, then rollup rows. Logs counts only."""
+    first, then rollup rows. Logs counts only. The walk is synchronous
+    database work, so it runs in a thread, one run at a time per worker
+    process (`saas_os.infra.jobs.single_flight`): a run that starts while
+    the previous one is still in its thread is skipped and logged."""
     attempt_settings = ai_attempt_retention_settings()
     rollup_settings = ai_usage_rollup_retention_settings()
     actor = SystemActor.from_job_actor(context.system_actor)
     correlation = SystemCorrelation.from_job_context(context)
+
+    def purge() -> None:
+        _purge_once(actor, correlation, attempt_settings, rollup_settings)
+
+    if not await run_in_thread_once("ai_attempt_retention", purge):
+        logger.info("ai_attempt_retention_skipped", extra={"reason": "previous_run_in_progress"})
+
+
+def _purge_once(
+    actor: SystemActor,
+    correlation: SystemCorrelation,
+    attempt_settings: AIAttemptRetentionSettings,
+    rollup_settings: AIUsageRollupRetentionSettings,
+) -> None:
     result = purge_expired_ai_attempts(
         actor=actor, correlation=correlation, settings=attempt_settings
     )

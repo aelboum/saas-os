@@ -139,6 +139,7 @@ from saas_os.core.identity.errors import SessionRetentionBatchInvariantError
 from saas_os.core.identity.models import Session
 from saas_os.infra.db import delete, select, session_scope
 from saas_os.infra.jobs import SystemJobContext, register_system_job
+from saas_os.infra.jobs.single_flight import run_in_thread_once
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +265,17 @@ async def _cleanup_expired_sessions_job(context: SystemJobContext) -> None:
     set at registration, means no result is persisted regardless);
     the bounded counts are logged, never returned to a caller that could
     accumulate them into anything unbounded.
+
+    The batched deletes are synchronous database work, so they run in a
+    thread, one run at a time per worker process
+    (`saas_os.infra.jobs.single_flight`): a run that starts while the
+    previous one is still in its thread is skipped and logged.
     """
+    if not await run_in_thread_once("session_cleanup", _cleanup_once):
+        logger.info("session_cleanup_skipped", extra={"reason": "previous_run_in_progress"})
+
+
+def _cleanup_once() -> None:
     result = cleanup_expired_sessions()
     logger.info(
         "session_cleanup_completed",
