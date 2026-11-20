@@ -657,3 +657,66 @@ def test_a_response_without_totals_stops_on_a_short_page(pat_file: Path) -> None
 
     zb.bootstrap(_config(pat_file), transport=httpx.MockTransport(handle))
     assert seen == [0, 100]
+
+
+# --- ADR-0064: post-logout redirect URI --------------------------------------------
+
+_POST_LOGOUT = "https://app.example.test/"
+
+
+def test_post_logout_uri_is_read_from_env_and_flag() -> None:
+    env = {
+        "ZITADEL_INTERNAL_URL": "http://z",
+        "OIDC_POST_LOGOUT_REDIRECT_URI": _POST_LOGOUT,
+    }
+    assert zb.load_config([], env).post_logout_redirect_uri == _POST_LOGOUT
+    flagged = zb.load_config(["--post-logout-redirect-uri", "https://x.example.test/bye"], env)
+    assert flagged.post_logout_redirect_uri == "https://x.example.test/bye"
+    assert zb.load_config([], {"ZITADEL_INTERNAL_URL": "http://z"}).post_logout_redirect_uri is None
+    blank = {"ZITADEL_INTERNAL_URL": "http://z", "OIDC_POST_LOGOUT_REDIRECT_URI": " "}
+    assert zb.load_config([], blank).post_logout_redirect_uri is None
+
+
+def test_new_application_is_created_with_the_post_logout_uri(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    config = zb.BootstrapConfig(
+        zitadel_url="http://z", pat_path=str(pat_file), post_logout_redirect_uri=_POST_LOGOUT
+    )
+    zb.bootstrap(config, transport=fake.transport())
+    app_request = fake.create_requests[1][1]
+    assert app_request["oidcConfiguration"]["postLogoutRedirectUris"] == [_POST_LOGOUT]
+    # Second run: already registered, nothing is updated.
+    zb.bootstrap(config, transport=fake.transport())
+    assert fake.update_requests == []
+
+
+def test_without_a_post_logout_uri_none_is_registered(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    zb.bootstrap(
+        zb.BootstrapConfig(zitadel_url="http://z", pat_path=str(pat_file)),
+        transport=fake.transport(),
+    )
+    assert "postLogoutRedirectUris" not in fake.create_requests[1][1]["oidcConfiguration"]
+
+
+def test_existing_application_gets_the_post_logout_uri_added_once(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    legacy = zb.BootstrapConfig(zitadel_url="http://z", pat_path=str(pat_file))
+    client_id = zb.bootstrap(legacy, transport=fake.transport())
+    oidc = fake.applications[0]["oidcConfiguration"]
+    oidc["clockSkew"] = "2s"
+    oidc["postLogoutRedirectUris"] = ["https://other.example.test/"]
+    before = json.loads(json.dumps(oidc))
+
+    upgraded = zb.BootstrapConfig(
+        zitadel_url="http://z", pat_path=str(pat_file), post_logout_redirect_uri=_POST_LOGOUT
+    )
+    assert zb.bootstrap(upgraded, transport=fake.transport()) == client_id
+    assert zb.bootstrap(upgraded, transport=fake.transport()) == client_id
+
+    assert len(fake.applications) == 1
+    assert len(fake.update_requests) == 1
+    after = fake.applications[0]["oidcConfiguration"]
+    assert after.pop("postLogoutRedirectUris") == ["https://other.example.test/", _POST_LOGOUT]
+    before.pop("postLogoutRedirectUris")
+    assert after == before  # every other setting kept
