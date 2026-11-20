@@ -282,6 +282,38 @@ def build_authorization_url(
     return f"{endpoints.authorization_endpoint}?{query}"
 
 
+def build_end_session_url(
+    config: OIDCProviderConfig,
+    endpoints: OIDCFlowEndpoints,
+    *,
+    post_logout_redirect_uri: str,
+    id_token_hint: str | None,
+) -> str | None:
+    """ADR-0064: the provider's discovered `end_session_endpoint` with the
+    parameters of OpenID Connect RP-Initiated Logout 1.0, section 2 -- or
+    `None` when the provider advertises no such endpoint (pure, no I/O).
+
+    `client_id` is always sent: section 2 requires it with a
+    `post_logout_redirect_uri` when no `id_token_hint` is, and it lets the
+    provider match that URI against the client's registered list either way.
+    `post_logout_redirect_uri` is the deployment's configured value
+    (`saas_os/api/auth/config.py`), never a browser-supplied one. No `state`
+    is sent: SaaS-OS takes no action when the browser comes back, so there
+    is nothing for one to bind. The returned URL carries the ID token when a
+    hint is given; it must only ever be a `Location` header, never logged."""
+    endpoint = endpoints.end_session_endpoint
+    if endpoint is None:
+        return None
+    params = {
+        "client_id": config.client_id,
+        "post_logout_redirect_uri": post_logout_redirect_uri,
+    }
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
+    separator = "&" if urllib.parse.urlsplit(endpoint).query else "?"
+    return f"{endpoint}{separator}{urllib.parse.urlencode(params)}"
+
+
 def _token_http_client() -> httpx.Client:
     """The one place the token-exchange HTTP client is constructed --
     tests substitute an `httpx.MockTransport`-backed client here.
@@ -416,6 +448,19 @@ class OIDCIdentityProvider:
         self, token: str, *, expected_nonce: str | None = None
     ) -> VerifiedIdentity:
         return validate_id_token(token, self._config, expected_nonce=expected_nonce)
+
+    def build_end_session_url(
+        self,
+        *,
+        post_logout_redirect_uri: str,
+        id_token_hint: str | None,
+    ) -> str | None:
+        return build_end_session_url(
+            self._config,
+            self._endpoints,
+            post_logout_redirect_uri=post_logout_redirect_uri,
+            id_token_hint=id_token_hint,
+        )
 
 
 @lru_cache

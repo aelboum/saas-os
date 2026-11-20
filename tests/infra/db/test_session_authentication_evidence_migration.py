@@ -114,10 +114,12 @@ def test_issue_session_writes_them_and_defaults_hold(admin: Engine) -> None:
 def test_downgrade_and_upgrade_change_only_the_columns(admin: Engine) -> None:
     cfg = _config()
     command.upgrade(cfg, "head")
-    others = _others(admin)
     user = create_user()
     session, _ = issue_session(user.id, multi_factor=True, lifetime=timedelta(minutes=5))
     try:
+        # The columns as this revision leaves them: later revisions add more.
+        command.downgrade(cfg, _REVISION)
+        others = _others(admin)
         command.downgrade(cfg, _PREVIOUS)
         assert not set(_NEW) & set(_columns(admin))
         assert _others(admin) == others

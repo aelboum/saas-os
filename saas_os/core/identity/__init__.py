@@ -101,6 +101,7 @@ from saas_os.core.identity.oidc import (
     OIDCIdentityProvider,
     VerifiedIdentity,
     build_authorization_url,
+    build_end_session_url,
     exchange_authorization_code,
     get_identity_provider,
     validate_id_token,
@@ -150,7 +151,13 @@ from saas_os.core.identity.session_retention import (
     SessionCleanupResult,
     cleanup_expired_sessions,
 )
-from saas_os.core.identity.sessions import issue_session, revoke_session, validate_session
+from saas_os.core.identity.sessions import (
+    LogoutRevocation,
+    issue_session,
+    revoke_session,
+    revoke_session_for_logout,
+    validate_session,
+)
 from saas_os.core.identity.user_authority import (
     MAX_RESOLVED_SESSIONS,
     UserDeactivationResult,
@@ -187,6 +194,7 @@ __all__ = [
     "get_oidc_client_secret",
     "validate_id_token",
     "build_authorization_url",
+    "build_end_session_url",
     "exchange_authorization_code",
     "StartedLogin",
     "ConsumedLogin",
@@ -238,6 +246,8 @@ __all__ = [
     "issue_session",
     "validate_session",
     "revoke_session",
+    "revoke_session_for_logout",
+    "LogoutRevocation",
     "SessionRetentionConfig",
     "get_session_retention_config",
     "DeactivationScanConfig",
