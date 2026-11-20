@@ -90,6 +90,7 @@ Configuration is environment variables. Secrets and connection strings (`DATABAS
 | `REDIS_URL` | application (rate limiting), worker (queue) | |
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
 | `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | `POST /auth/logout/redirect`, the login callback | Optional (ADR-0064). Unset: logout ends only the SaaS OS session, as before. Set: the browser logout also ends the identity provider's session. An absolute URL on the application's own origin (`https` in production) that must also be registered at the provider as a post-logout redirect URI, character for character. Needs field encryption (`FIELD_ENCRYPTION_ACTIVE_KEY_VERSION`, `FIELD_ENCRYPTION_KEY_<VERSION>`) to keep the ID token; without a key the logout sends no `id_token_hint`. See "Signing out" in section 9. |
 | `WEBHOOK_ALLOWED_PORTS` | webhook subscription and delivery | Optional, for example `443`. Unset, any port on a public address is allowed. Set, a webhook URL must use a listed port (443 for `https` and 80 for `http` when it names none); existing subscriptions on other ports are dead-lettered at their next delivery. An empty or invalid value is a configuration error (ADR-0035, amendment of 2026-10-19). |
 | `EMAIL_PROVIDER` | notification email, `send_email()` without `provider=`; worker startup | `smtp`, `mailpit` (ADR-0057) or `resend` (ADR-0058). Unset: SMTP when `SMTP_HOST` is set, as before. Set: the worker validates the email configuration at startup and refuses to start if it is invalid (no network call). `mailpit` is development-only: refused unless `ENVIRONMENT` is `development` or `test`, with no override. There is no way to register another provider from a product; a product that sends its own mail through another service passes `provider=` to `send_email()`. |
 | `EMAIL_DEFAULT_SENDER` | notification email | The `From:` address, for every provider. Required when `EMAIL_PROVIDER` is set. |
@@ -360,6 +361,23 @@ Rules:
 - Authentication at the HTTP layer is session-based, and a route you choose can also accept an API key (ADR-0047): declare it with `require_permission(resource, action, api_key=True)` and the route answers a request carrying `X-API-Key: sok_...` as the key's owner -- the user who created it, or a service account (`context.principal`; build Core callers with `saas_os.api.v1.request_caller(context)`, which gives a `UserCaller` or a `ServiceAccountCaller`). A key reaches only its own tenant, never with a session credential in the same request, and is rate-limited per key as well as per tenant. A permission that changes authority (memberships, roles, invitations, API keys, service accounts, the billing mutations, tenant self-suspension: `saas_os.core.rbac.is_authority_changing`) cannot accept a key. Keys issued over HTTP expire within 365 days (`expires_in_days`). None of SaaS OS's own routers accepts a key. On a route you open to keys, `context.actor_id` may be a service account's id: never use it as a user id there (no `UserCaller(context.actor_id)`, no foreign key to `core.users`); check `context.principal`.
 - Other available dependencies: `require_entitlement_and_quota` (billing entitlement plus usage quota) and `get_idempotency_key`, both in `saas_os.api.dependencies`.
 - A route that changes security-relevant state must leave audit evidence in the same transaction (`saas_os.core.audit_log`).
+
+### Signing out
+
+Two logout routes exist; pick by what your sign-out control is.
+
+- **`POST /auth/logout/redirect`** (ADR-0064): for a browser sign-out button. Make it an ordinary HTML form, not `fetch`:
+
+  ```html
+  <form method="post" action="/auth/logout/redirect"><button>Sign out</button></form>
+  ```
+
+  It revokes the session the cookie names (also an expired one, whose provider session may still be alive) and clears the cookie first. With `OIDC_POST_LOGOUT_REDIRECT_URI` set and a provider that advertises an `end_session_endpoint`, it then sends the browser (`303`) to the provider with `client_id`, `post_logout_redirect_uri` and `id_token_hint`; the provider ends its own session and returns the browser to your URI. Otherwise it sends the browser to the path of that URI, or `/`. It needs no valid session (a missing or revoked one just redirects) but always needs the same-origin `Origin` header a browser form sends; anything else is `403`. It reads only the cookie, never `Authorization`.
+- **`POST /auth/logout`**: unchanged, `204`, for `fetch` and API clients. It ends only the SaaS OS session: the provider's session survives, so the next `/auth/login` in that browser may sign the same person in without a password. Do not use it for a sign-out button on a device that people share.
+
+What a successful provider logout ends: this browser's SaaS OS session and this browser's provider session. Not the person's sessions in other browsers, and SaaS OS makes no claim about other applications that use the same provider.
+
+To turn it on: set `OIDC_POST_LOGOUT_REDIRECT_URI`, register the identical URI at the provider (ZITADEL: the application's "Post Logout URIs"; `saas-os-local-identity` registers it locally when the variable is set), configure field encryption, and change the sign-out button to the form above. Sessions issued before the upgrade have no stored ID token; their logout sends no hint (see the troubleshooting list in `docs/LOCAL-IDENTITY.md`).
 
 ### Opt-in platform routers
 
@@ -1046,6 +1064,15 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 4. **Worker jobs run off the event loop** (#283, #284). The audit digest job, `_cleanup_expired_sessions_job`, `_purge_expired_ai_attempts_job` and `_report_audit_identity_expiry_job` now run their database work in a thread, one run at a time per worker process; a run that starts while the previous one is still working is skipped and logged with `reason` `previous_run_in_progress` (`audit_digest_cycle_skipped`, `session_cleanup_skipped`, `ai_attempt_retention_skipped`, `audit_identity_expiry_report_skipped`). Their work and results are unchanged. If you alert on these jobs' logs, add the skipped events. A product job is not affected.
 5. **Check the tag's signature** before pinning: `git tag -v v0.15.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 6. **Rolling back** to v0.14.0: move the pin back. There is no migration to undo. Settings a tenant saved through the new package stay in the tables that v0.14.0 already had and keep their effect there.
+
+### Unreleased: RP-initiated logout (ADR-0064)
+
+On `main` after v0.15.0, not yet in a release.
+
+1. **Migrate first.** Run SaaS OS's migrations to `8db003ab849e` before starting the new code: one nullable column on `core.sessions`, catalog-only.
+2. **Nothing changes until you opt in.** Without `OIDC_POST_LOGOUT_REDIRECT_URI`, both logout routes end only the SaaS OS session, and no ID token is stored.
+3. **If you implement `IdentityProvider` yourself** (tests, a custom adapter), add `build_end_session_url(*, post_logout_redirect_uri, id_token_hint) -> str | None`; returning `None` keeps logout local.
+4. **To opt in:** follow "Signing out" in section 9.
 
 ## 15. Product deployment checklist
 
