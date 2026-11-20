@@ -1,16 +1,4 @@
 {
-  "_about": "Advisories the security gate accepts for a limited time. Read by scripts/npm_audit_gate.py. An entry is not a fix. Each entry applies only to its exact advisory id and package, only until its expiry date, and only while the advisory stays out of production dependencies and npm offers no non-breaking fix. Adding or extending an entry requires the repository owner's decision. See docs/SECURITY-EXCEPTION-picomatch.md (current) and docs/SECURITY-EXCEPTION-braces.md (closed).",
-  "npm": [
-    {
-      "id": "GHSA-fc5q-39xc-vjpf",
-      "package": "picomatch",
-      "severity": "high",
-      "reason": "No patched release exists (4.0.7 is the latest; every version is affected). Reached only through the development dependencies vite, vitest, @vitejs/plugin-react, eslint-config-next and the TypeScript ESLint tooling; npm audit --omit=dev reports 0 vulnerabilities; no external input reaches a glob matcher.",
-      "approved_by": "repository owner",
-      "approved_on": "2026-11-17",
-      "expires": "2026-12-17",
-      "review_when": "picomatch ships a fix; the advisory's severity or range changes; it is withdrawn; vite, vitest or eslint-config-next is upgraded.",
-      "remediation": "Adopt the patched release when one exists and delete this entry. See docs/SECURITY-EXCEPTION-picomatch.md."
-    }
-  ]
+  "_about": "Advisories the security gate accepts for a limited time. Read by scripts/npm_audit_gate.py. An entry is not a fix. Each entry applies only to its exact advisory id and package, only until its expiry date, and only while the advisory stays out of production dependencies and npm offers no non-breaking fix. Adding or extending an entry requires the repository owner's decision. See docs/SECURITY-EXCEPTION-picomatch.md and docs/SECURITY-EXCEPTION-braces.md (both closed).",
+  "npm": []
 }
