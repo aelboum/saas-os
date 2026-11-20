@@ -26,6 +26,10 @@ Routes (mounted at the app root, outside `/v1`, like `saas_os/api/health.py`):
     GET  /auth/login      -> 303 to the provider (state + nonce + PKCE S256)
     GET  /auth/callback   -> validates, exchanges, issues session, 303 home
     POST /auth/logout     -> revokes the current session, clears the cookie
+    POST /auth/logout/redirect
+                          -> ADR-0064: browser form logout; revokes the
+                             cookie's session first, then 303 to the
+                             provider's end_session_endpoint (or a local path)
     GET  /auth/me         -> {"user_id": ...} for the current session
 """
 

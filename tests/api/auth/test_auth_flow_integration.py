@@ -59,7 +59,11 @@ from saas_os.api.v1.tenant_status import ACTION, RESOURCE
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.errors import SessionRevokedError
 from saas_os.core.identity.login_transactions import derive_code_challenge
-from saas_os.core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
+from saas_os.core.identity.provider import (
+    OIDCConfigurationError,
+    OIDCFlowEndpoints,
+    OIDCProviderConfig,
+)
 from saas_os.core.identity.service import (
     add_tenant_membership,
     find_external_identity,
@@ -219,6 +223,7 @@ class Provider:
         self.token_status = 200
         self.token_body_override: object | None = None
         self.raise_transport = False
+        self.issued_id_tokens: list[str] = []
 
     # The "user authenticates at the provider" step: given the redirect
     # the app produced, mint an authorization code bound to that request.
@@ -249,7 +254,9 @@ class Provider:
         key = self.sign_with or self.private_key
         if self.alg == "HS256":
             return jwt.encode(claims, "a-shared-secret-that-is-long-enough-for-hs256-use", "HS256")
-        return jwt.encode(claims, key, algorithm=self.alg, headers={"kid": _KID})
+        token = jwt.encode(claims, key, algorithm=self.alg, headers={"kid": _KID})
+        self.issued_id_tokens.append(token)
+        return token
 
     def token_handler(self, request: httpx.Request) -> httpx.Response:
         if self.raise_transport:
@@ -279,9 +286,22 @@ class Provider:
         )
 
 
+def _fresh_auth_rate_limit_window() -> None:
+    """Each test starts a fresh pre-login rate-limit window for the
+    TestClient's own address (`testclient`) only: the suite logs in more
+    often than the default 60 requests a minute allow, and a rerun inside
+    the same minute would otherwise inherit the previous run's count."""
+    import redis as redis_sync
+
+    r = redis_sync.Redis.from_url(get_ratelimit_config().redis_url)
+    for key in r.scan_iter("ratelimit:auth:testclient*"):
+        r.delete(key)
+
+
 @pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> Iterator[Provider]:
     p = Provider()
+    _fresh_auth_rate_limit_window()
     monkeypatch.setenv("OIDC_REDIRECT_URI", _REDIRECT_URI)
     monkeypatch.setenv("AUTH_COOKIE_NAME", _COOKIE)
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")  # TestClient speaks plain http
@@ -757,3 +777,322 @@ def test_no_secret_appears_in_logs_responses_or_audit_metadata(
             assert forbidden not in body
         assert "Traceback" not in body
     assert id_token is None
+
+
+# --- ADR-0064: RP-initiated logout (POST /auth/logout/redirect) -------------------
+
+_ORIGIN = {"Origin": "http://testserver"}
+_POST_LOGOUT_URI = "http://testserver/signed-out"
+_END_SESSION = f"{_ISSUER}/oidc/v1/end_session"
+_ENDPOINTS_WITH_LOGOUT = OIDCFlowEndpoints(
+    authorization_endpoint=_ENDPOINTS.authorization_endpoint,
+    token_endpoint=_ENDPOINTS.token_endpoint,
+    end_session_endpoint=_END_SESSION,
+)
+
+
+@pytest.fixture
+def rp_logout(monkeypatch: pytest.MonkeyPatch, provider: Provider) -> Provider:
+    """The stand-in provider, now advertising an `end_session_endpoint`, and
+    the deployment configured for RP-initiated logout."""
+    monkeypatch.setenv("OIDC_POST_LOGOUT_REDIRECT_URI", _POST_LOGOUT_URI)
+    get_auth_http_config.cache_clear()
+    monkeypatch.setattr(
+        routes_module,
+        "get_identity_provider",
+        lambda: oidc_module.OIDCIdentityProvider(_PROVIDER, _ENDPOINTS_WITH_LOGOUT),
+    )
+    return provider
+
+
+def _session_row(session_id: uuid.UUID) -> dict[str, object]:
+    with session_scope() as db:
+        row = (
+            db.execute(
+                text(
+                    "SELECT revoked_at, verified_email, id_token_hint_ciphertext "
+                    "FROM core.sessions WHERE id = :id"
+                ),
+                {"id": str(session_id)},
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+def _logged_in(client: TestClient, provider: Provider) -> tuple[str, uuid.UUID]:
+    response = _login(client, provider)
+    assert response.status_code == 303
+    raw = client.cookies.get(_COOKIE)
+    assert raw
+    return raw, validate_session(raw).id
+
+
+def _cookie_cleared(response: httpx.Response) -> bool:
+    jar = _set_cookie_header(response, _COOKIE)
+    return jar is not None and jar[_COOKIE].value == "" and jar[_COOKIE]["max-age"] == "0"
+
+
+def _query(url: str) -> dict[str, list[str]]:
+    return parse_qs(urlsplit(url).query, keep_blank_values=True)
+
+
+def test_rp_logout_revokes_first_then_redirects_to_the_provider_with_the_hint(
+    client: TestClient, rp_logout: Provider
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    issued = rp_logout.issued_id_tokens[-1]
+    stored = _session_row(session_id)["id_token_hint_ciphertext"]
+    assert isinstance(stored, str) and stored
+    assert issued not in stored and issued.split(".")[1] not in stored  # encrypted at rest
+
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    parts = urlsplit(location)
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == _END_SESSION
+    assert _query(location) == {
+        "client_id": [_CLIENT_ID],
+        "post_logout_redirect_uri": [_POST_LOGOUT_URI],
+        "id_token_hint": [issued],
+    }
+    assert _cookie_cleared(response)
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert issued not in response.text
+
+    row = _session_row(session_id)
+    assert row["revoked_at"] is not None
+    assert row["id_token_hint_ciphertext"] is None
+    assert row["verified_email"] is None
+    with pytest.raises(SessionRevokedError):
+        validate_session(raw)
+
+    # The old cookie, replayed, is refused everywhere.
+    replay = TestClient(app)
+    replay.cookies.set(_COOKIE, raw)
+    assert replay.get("/auth/me").status_code == 401
+    assert replay.post("/auth/logout", headers=_ORIGIN).status_code == 401
+
+
+def test_rp_logout_repeated_is_idempotent_and_sends_no_hint(
+    client: TestClient, rp_logout: Provider
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    first = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert first.status_code == 303
+    revoked_at = _session_row(session_id)["revoked_at"]
+
+    again = TestClient(app)
+    again.cookies.set(_COOKIE, raw)
+    second = again.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert second.status_code == 303
+    assert _query(second.headers["location"]) == {
+        "client_id": [_CLIENT_ID],
+        "post_logout_redirect_uri": [_POST_LOGOUT_URI],
+    }
+    assert _cookie_cleared(second)
+    assert _session_row(session_id)["revoked_at"] == revoked_at  # nothing changed
+
+    # No cookie at all: the same safe redirect.
+    bare = TestClient(app).post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert bare.status_code == 303
+    assert "id_token_hint" not in _query(bare.headers["location"])
+
+
+def test_rp_logout_of_an_expired_session_still_ends_the_provider_session(
+    client: TestClient, rp_logout: Provider
+) -> None:
+    """The application session expired (12 h) but the provider's may not
+    have: the logout still revokes the row and still sends its hint."""
+    raw, session_id = _logged_in(client, rp_logout)
+    issued = rp_logout.issued_id_tokens[-1]
+    with session_scope() as db:
+        db.execute(
+            text(
+                "UPDATE core.sessions SET expires_at = now() - make_interval(mins => 1) "
+                "WHERE id = :id"
+            ),
+            {"id": str(session_id)},
+        )
+    assert client.get("/auth/me").status_code == 401
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(_END_SESSION + "?")
+    assert _query(response.headers["location"])["id_token_hint"] == [issued]
+    assert _cookie_cleared(response)
+    row = _session_row(session_id)
+    assert row["revoked_at"] is not None and row["id_token_hint_ciphertext"] is None
+
+
+def test_rp_logout_of_an_inactive_users_session_still_ends_the_provider_session(
+    client: TestClient, rp_logout: Provider
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    issued = rp_logout.issued_id_tokens[-1]
+    user_id = validate_session(raw).user_id
+    _admin_execute("UPDATE core.users SET is_active = false WHERE id = :u", {"u": str(user_id)})
+    try:
+        assert client.get("/auth/me").status_code == 401
+        response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+        assert response.status_code == 303
+        assert _query(response.headers["location"])["id_token_hint"] == [issued]
+        assert _session_row(session_id)["revoked_at"] is not None
+    finally:
+        _admin_execute("UPDATE core.users SET is_active = true WHERE id = :u", {"u": str(user_id)})
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # no Origin: not a browser form post
+        {"Origin": "https://evil.example.test"},
+        {"Origin": "http://sub.testserver"},
+        {"Origin": "null"},
+        {"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"},
+        {"Origin": "http://testserver", "Sec-Fetch-Site": "same-site"},
+    ],
+)
+def test_rp_logout_from_another_origin_is_refused_and_changes_nothing(
+    client: TestClient, rp_logout: Provider, headers: dict[str, str]
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    response = client.post("/auth/logout/redirect", headers=headers, follow_redirects=False)
+    assert response.status_code == 403
+    assert "location" not in response.headers
+    assert _set_cookie_header(response, _COOKIE) is None
+    row = _session_row(session_id)
+    assert row["revoked_at"] is None and row["id_token_hint_ciphertext"] is not None
+    assert client.get("/auth/me").status_code == 200
+
+    # Without a cookie too: another site cannot send a browser through it.
+    bare = TestClient(app).post("/auth/logout/redirect", headers=headers, follow_redirects=False)
+    assert bare.status_code == 403
+
+
+def test_rp_logout_ignores_an_authorization_header(client: TestClient, rp_logout: Provider) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    other = TestClient(app)
+    response = other.post(
+        "/auth/logout/redirect",
+        headers={**_ORIGIN, "Authorization": f"Bearer {raw}"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "id_token_hint" not in _query(response.headers["location"])
+    assert _session_row(session_id)["revoked_at"] is None  # a cookie flow only
+
+
+def test_rp_logout_with_an_unreachable_provider_keeps_the_session_revoked(
+    client: TestClient, rp_logout: Provider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+
+    def _discovery_fails() -> object:
+        raise OIDCConfigurationError("Could not fetch OIDC discovery document")
+
+    monkeypatch.setattr(routes_module, "get_identity_provider", _discovery_fails)
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/signed-out"  # same-origin, no provider
+    assert _cookie_cleared(response)
+    row = _session_row(session_id)
+    assert row["revoked_at"] is not None and row["id_token_hint_ciphertext"] is None
+    with pytest.raises(SessionRevokedError):
+        validate_session(raw)
+
+
+def test_rp_logout_with_a_provider_without_end_session_is_local(
+    client: TestClient, rp_logout: Provider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    monkeypatch.setattr(
+        routes_module,
+        "get_identity_provider",
+        lambda: oidc_module.OIDCIdentityProvider(_PROVIDER, _ENDPOINTS),
+    )
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/signed-out"
+    assert _session_row(session_id)["revoked_at"] is not None
+
+
+def test_without_configuration_nothing_is_stored_and_logout_is_local(
+    client: TestClient, provider: Provider
+) -> None:
+    raw, session_id = _logged_in(client, provider)
+    assert _session_row(session_id)["id_token_hint_ciphertext"] is None
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert _cookie_cleared(response)
+    assert _session_row(session_id)["revoked_at"] is not None
+
+
+def test_existing_api_logout_also_discards_the_stored_hint(
+    client: TestClient, rp_logout: Provider
+) -> None:
+    raw, session_id = _logged_in(client, rp_logout)
+    assert _session_row(session_id)["id_token_hint_ciphertext"] is not None
+    assert client.post("/auth/logout", headers=_ORIGIN).status_code == 204
+    row = _session_row(session_id)
+    assert row["revoked_at"] is not None and row["id_token_hint_ciphertext"] is None
+
+
+def test_a_missing_encryption_key_never_blocks_login_and_logout_sends_no_hint(
+    client: TestClient, rp_logout: Provider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import saas_os.core.identity.sessions as sessions_module
+    from saas_os.core.crypto import EncryptionKeyUnavailableError
+
+    class _NoKey:
+        def encrypt_str(self, *args: object, **kwargs: object) -> str:
+            raise EncryptionKeyUnavailableError("FIELD_ENCRYPTION_ACTIVE_KEY_VERSION")
+
+    monkeypatch.setattr(sessions_module, "EncryptionService", _NoKey)
+    raw, session_id = _logged_in(client, rp_logout)
+    assert _session_row(session_id)["id_token_hint_ciphertext"] is None
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert "id_token_hint" not in _query(response.headers["location"])
+    assert _session_row(session_id)["revoked_at"] is not None
+
+
+def test_a_hint_moved_to_another_session_does_not_decrypt(rp_logout: Provider) -> None:
+    first, second = TestClient(app), TestClient(app)
+    _, first_id = _logged_in(first, rp_logout)
+    _, second_id = _logged_in(second, rp_logout)
+    with session_scope() as db:
+        db.execute(
+            text(
+                "UPDATE core.sessions SET id_token_hint_ciphertext = "
+                "(SELECT id_token_hint_ciphertext FROM core.sessions WHERE id = :src) "
+                "WHERE id = :dst"
+            ),
+            {"src": str(first_id), "dst": str(second_id)},
+        )
+    response = second.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert "id_token_hint" not in _query(response.headers["location"])  # AAD mismatch
+    assert _session_row(second_id)["revoked_at"] is not None
+
+
+def test_rp_logout_never_logs_the_id_token_or_the_session_secret(
+    client: TestClient, rp_logout: Provider, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    raw, _ = _logged_in(client, rp_logout)
+    issued = rp_logout.issued_id_tokens[-1]
+    response = client.post("/auth/logout/redirect", headers=_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    events = {record.getMessage() for record in caplog.records}
+    assert {"auth_logout_initiated", "auth_logout_local_completed"} <= events
+    assert "auth_logout_idp_redirected" in events
+    for record in caplog.records:
+        rendered = f"{record.getMessage()} {record.__dict__!r}"
+        assert issued not in rendered
+        assert issued.split(".")[1] not in rendered
+        assert raw not in rendered
+        assert _END_SESSION not in rendered  # the full URL is never logged
