@@ -80,7 +80,9 @@ license = { text = "UNLICENSED" }
 # follows. No new package is installed by this line; `pip-audit` already
 # scans this exact package/version today.
 dependencies = [
-    "fastapi>=0.115",
+    # 0.142: the first release with the `telemetry` argument, which
+    # `saas_os/api/platform.py` passes to switch FastAPI's native telemetry off.
+    "fastapi>=0.142",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
