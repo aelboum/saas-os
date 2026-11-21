@@ -119,6 +119,19 @@ def build_platform_app(*, title: str, version: str) -> FastAPI:
         version=version,
         debug=False,
         lifespan=_platform_lifespan,
+        # FastAPI's native telemetry (0.142+) switches itself on once a
+        # global tracer provider exists, which `configure_tracing()` installs.
+        # It would add a second request span carrying `url.query` verbatim
+        # (on /auth/callback: the OIDC `code` and `state`), and from the
+        # environment it can attach OTLP exporters. The one request span is
+        # `CorrelationIdMiddleware`'s, which records no query string.
+        telemetry={
+            "tracing": False,
+            "metrics": False,
+            "logs": False,
+            "operation_spans": False,
+            "auto_configure": False,
+        },
         **documentation,  # type: ignore[arg-type]
     )
     app.add_middleware(CorrelationIdMiddleware)
