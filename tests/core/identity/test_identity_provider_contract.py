@@ -127,6 +127,11 @@ class FakeIdentityProvider:
         self.validate_calls.append({"token": token, "expected_nonce": expected_nonce})
         return self._identity
 
+    def build_end_session_url(
+        self, *, post_logout_redirect_uri: str, id_token_hint: str | None
+    ) -> str | None:
+        return None
+
 
 # --- Structural conformance: two different implementations, one contract --------
 

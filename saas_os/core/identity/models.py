@@ -95,6 +95,7 @@ from saas_os.infra.db import (
     Index,
     Mapped,
     String,
+    Text,
     TimestampMixin,
     UniqueConstraint,
     UUIDPrimaryKeyMixin,
@@ -167,6 +168,12 @@ class Session(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     provider_authenticated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # ADR-0064: the ID token of the login that issued this session, encrypted
+    # with `saas_os.core.crypto.EncryptionService` (associated data bound to
+    # this row's id), kept only to send as `id_token_hint` when the browser
+    # logs out at the identity provider. `None` when RP-initiated logout is
+    # not configured or no key was available. Cleared on revocation.
+    id_token_hint_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class LoginTransaction(Base, UUIDPrimaryKeyMixin, TimestampMixin):

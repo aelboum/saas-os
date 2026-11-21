@@ -115,3 +115,98 @@ def test_env_invalid_boolean_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "maybe")
     with pytest.raises(AuthConfigurationError):
         get_auth_http_config()
+
+
+# --- ADR-0064: OIDC_POST_LOGOUT_REDIRECT_URI ----------------------------------------
+
+_APP_CALLBACK = "https://app.example.com/auth/callback"
+
+
+def test_post_logout_uri_is_optional_and_off_by_default() -> None:
+    config = AuthHttpConfig(redirect_uri=_APP_CALLBACK)
+    assert config.post_logout_redirect_uri is None
+    assert config.post_logout_local_path == "/"
+
+
+@pytest.mark.parametrize(
+    ("uri", "local_path"),
+    [
+        ("https://app.example.com/", "/"),
+        ("https://app.example.com", "/"),
+        ("https://app.example.com/signed-out", "/signed-out"),
+        ("https://APP.example.com:443/bye?lang=nl", "/bye?lang=nl"),
+    ],
+)
+def test_post_logout_uri_on_the_application_origin_is_accepted(uri: str, local_path: str) -> None:
+    config = AuthHttpConfig(redirect_uri=_APP_CALLBACK, post_logout_redirect_uri=uri)
+    assert config.post_logout_redirect_uri == uri
+    assert config.post_logout_local_path == local_path
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://evil.example.com/",  # another host
+        "https://example.com/",  # the parent domain
+        "https://sub.app.example.com/",  # a sibling/child subdomain
+        "https://app.example.com:8443/",  # another port
+        "http://app.example.com/",  # another scheme
+        "//app.example.com/",  # scheme-relative
+        "/signed-out",  # relative
+        "javascript:alert(1)",
+        "https://user:pw@app.example.com/",  # credentials  # pragma: allowlist secret
+        "https://app.example.com/#frag",  # fragment
+        "https://app.example.com/a b",  # whitespace
+        r"https://app.example.com/\evil.example.com",  # backslash
+        "https://app.example.com:notaport/",
+        "",
+    ],
+)
+def test_post_logout_uri_off_the_application_origin_is_refused(uri: str) -> None:
+    with pytest.raises(AuthConfigurationError, match="OIDC_POST_LOGOUT_REDIRECT_URI"):
+        AuthHttpConfig(redirect_uri=_APP_CALLBACK, post_logout_redirect_uri=uri)
+
+
+def test_post_logout_uri_follows_public_app_origin_when_declared() -> None:
+    config = AuthHttpConfig(
+        redirect_uri="https://shop.example.com/auth/callback",
+        public_app_origin="https://shop.example.com",
+        post_logout_redirect_uri="https://shop.example.com/",
+    )
+    assert config.post_logout_local_path == "/"
+    with pytest.raises(AuthConfigurationError, match="OIDC_POST_LOGOUT_REDIRECT_URI"):
+        AuthHttpConfig(
+            redirect_uri="https://shop.example.com/auth/callback",
+            public_app_origin="https://shop.example.com",
+            post_logout_redirect_uri="https://api.example.com/",
+        )
+
+
+def test_post_logout_uri_must_use_https_in_production() -> None:
+    with pytest.raises(AuthConfigurationError, match="https in production"):
+        AuthHttpConfig(
+            redirect_uri="https://app.example.com/auth/callback",
+            environment="production",
+            post_logout_redirect_uri="http://app.example.com/",
+        )
+    config = AuthHttpConfig(
+        redirect_uri="http://localhost:8000/auth/callback",
+        environment="test",
+        post_logout_redirect_uri="http://localhost:8000/",
+    )
+    assert config.post_logout_local_path == "/"
+
+
+def test_env_reads_post_logout_uri_and_treats_empty_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OIDC_REDIRECT_URI", _APP_CALLBACK)
+    monkeypatch.setenv("OIDC_POST_LOGOUT_REDIRECT_URI", "https://app.example.com/bye")
+    assert get_auth_http_config().post_logout_redirect_uri == "https://app.example.com/bye"
+    get_auth_http_config.cache_clear()
+    monkeypatch.setenv("OIDC_POST_LOGOUT_REDIRECT_URI", "")
+    assert get_auth_http_config().post_logout_redirect_uri is None
+    get_auth_http_config.cache_clear()
+    monkeypatch.setenv("OIDC_POST_LOGOUT_REDIRECT_URI", "https://evil.example.com/")
+    with pytest.raises(AuthConfigurationError):
+        get_auth_http_config()

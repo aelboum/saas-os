@@ -18,10 +18,13 @@ function here uses `saas_os.infra.db.session_scope()`, never
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from saas_os.core.crypto import EncryptionError, EncryptionService
 from saas_os.core.identity.errors import (
     InactiveUserError,
     SessionExpiredError,
@@ -37,9 +40,41 @@ from saas_os.infra.db import select, session_scope
 _TOKEN_BYTES = 32
 _DEFAULT_SESSION_LIFETIME = timedelta(hours=12)
 
+logger = logging.getLogger(__name__)
+
 
 def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _id_token_hint_associated_data(session_id: uuid.UUID) -> bytes:
+    """ADR-0064: binds a stored ID token to the one session row it belongs
+    to -- a ciphertext copied onto another row does not decrypt."""
+    return f"core.sessions.id_token_hint:{session_id}".encode()
+
+
+def _encrypt_id_token_hint(session_id: uuid.UUID, id_token: str) -> str | None:
+    """The encrypted hint, or `None` when no field-encryption key is
+    available. A missing key must not stop a login: the logout then sends
+    `client_id` without a hint, and this is logged as an error by class name
+    only so an operator can see RP-initiated logout is degraded."""
+    try:
+        return EncryptionService().encrypt_str(
+            id_token, associated_data=_id_token_hint_associated_data(session_id)
+        )
+    except EncryptionError as exc:
+        logger.error("auth_id_token_hint_not_stored", extra={"auth_failure": type(exc).__name__})
+        return None
+
+
+def _decrypt_id_token_hint(session_id: uuid.UUID, ciphertext: str) -> str | None:
+    try:
+        return EncryptionService().decrypt_str(
+            ciphertext, associated_data=_id_token_hint_associated_data(session_id)
+        )
+    except EncryptionError as exc:
+        logger.error("auth_id_token_hint_unreadable", extra={"auth_failure": type(exc).__name__})
+        return None
 
 
 def issue_session(
@@ -49,6 +84,7 @@ def issue_session(
     verified_email: str | None = None,
     multi_factor: bool = False,
     provider_authenticated_at: datetime | None = None,
+    id_token_hint: str | None = None,
 ) -> tuple[Session, str]:
     """Issue a new platform session for `user_id`. Returns the persisted
     session record (never carrying the raw secret -- only its hash) and the
@@ -62,12 +98,18 @@ def issue_session(
     `multi_factor` and `provider_authenticated_at` record what the identity
     provider asserted about this login (its `amr` and `auth_time` claims,
     ADR-0049); the platform-admin router reads them.
+
+    `id_token_hint` is the raw ID token of this login, passed only when the
+    deployment uses RP-initiated logout (ADR-0064). It is stored encrypted,
+    bound to the new row's id, and never returned on the record.
     """
     if not isinstance(multi_factor, bool):
         raise TypeError("multi_factor must be a bool.")
     raw_token = secrets.token_urlsafe(_TOKEN_BYTES)
     token_hash = _hash_token(raw_token)
     now = datetime.now(UTC)
+    session_id = uuid.uuid4()
+    hint_ciphertext = _encrypt_id_token_hint(session_id, id_token_hint) if id_token_hint else None
 
     with session_scope() as db_session:
         # ADR-0031: a session is never issued to an inactive user.
@@ -84,12 +126,14 @@ def issue_session(
         if not is_active:
             raise InactiveUserError(user_id)
         record = Session(
+            id=session_id,
             user_id=user_id,
             token_hash=token_hash,
             expires_at=now + lifetime,
             verified_email=normalize_verified_email(verified_email),
             multi_factor=multi_factor,
             provider_authenticated_at=provider_authenticated_at,
+            id_token_hint_ciphertext=hint_ciphertext,
         )
         db_session.add(record)
         db_session.flush()
@@ -172,8 +216,51 @@ def revoke_session(session_id: uuid.UUID) -> None:
         if record.revoked_at is None:
             record.revoked_at = datetime.now(UTC)
         # ADR-0046: a revoked session keeps no verified email while it waits
-        # for retention to delete it.
+        # for retention to delete it. ADR-0064: nor its ID token.
         record.verified_email = None
+        record.id_token_hint_ciphertext = None
+
+
+@dataclass(frozen=True)
+class LogoutRevocation:
+    """ADR-0064: what `revoke_session_for_logout()` ended. `id_token_hint`
+    is the decrypted ID token of that login, or `None`. Never logged."""
+
+    session_id: uuid.UUID
+    user_id: uuid.UUID
+    id_token_hint: str | None = field(default=None, repr=False)
+
+
+def revoke_session_for_logout(raw_token: str) -> LogoutRevocation | None:
+    """ADR-0064: the browser logout's revocation, by the raw session secret
+    the cookie carries. Looks the row up by the token's hash (never the raw
+    value) and, if it is not yet revoked, revokes it and takes its stored ID
+    token out of the row, in one committed transaction -- before the caller
+    builds any redirect, so an identity provider that is unreachable
+    afterwards cannot leave the session usable.
+
+    Unlike `validate_session()`, an *expired* session, or one whose user is
+    inactive, is still ended here and still yields its hint: its application
+    session is already unusable, but the identity provider's session may
+    not be, and ending that is the point of the logout. The caller has
+    proved possession of the session secret, which is the same proof every
+    authentication accepts. A revoked or unknown session yields `None` and
+    changes nothing; the row keeps no ID token or verified email either way.
+    """
+    token_hash = _hash_token(raw_token)
+    with session_scope() as db_session:
+        record = db_session.execute(
+            select(Session).where(Session.token_hash == token_hash).with_for_update()
+        ).scalar_one_or_none()
+        if record is None or record.revoked_at is not None:
+            return None
+        session_id, user_id = record.id, record.user_id
+        ciphertext = record.id_token_hint_ciphertext
+        record.revoked_at = datetime.now(UTC)
+        record.verified_email = None
+        record.id_token_hint_ciphertext = None
+    hint = _decrypt_id_token_hint(session_id, ciphertext) if ciphertext else None
+    return LogoutRevocation(session_id=session_id, user_id=user_id, id_token_hint=hint)
 
 
 def list_user_verified_emails(user_id: uuid.UUID) -> frozenset[str]:

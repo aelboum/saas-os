@@ -70,6 +70,9 @@ def test_every_route_of_api_main_declares_exactly_one_policy() -> None:
         "GET /auth/login": P.PUBLIC,
         "GET /auth/callback": P.PUBLIC,
         "POST /auth/logout": P.AUTHENTICATED,
+        # ADR-0064: public so a stale session still logs out; the handler
+        # enforces same-origin on every request.
+        "POST /auth/logout/redirect": P.PUBLIC,
         "GET /auth/me": P.AUTHENTICATED,
         "GET /v1/tenants/{tenant_id}/status": P.PERMISSION,
     }

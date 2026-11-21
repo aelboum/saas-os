@@ -19,6 +19,12 @@ for the boundary this package keeps; this module is the sequence:
     POST /auth/logout                        (requires a valid session)
         revoke_session(session.id); clear the cookie; 204
 
+    POST /auth/logout/redirect               (ADR-0064; an HTML form post)
+        same-origin check, always             (403 otherwise)
+        revoke_session_for_logout(cookie)     (committed first; takes the ID token)
+        clear the cookie; 303 -> end_session_endpoint?client_id&
+            post_logout_redirect_uri&id_token_hint, or the local path
+
     GET /auth/me                             (requires a valid session)
         {"user_id": "<uuid>"}
 
@@ -70,7 +76,12 @@ from saas_os.api.auth.config import (
     get_auth_http_config,
     resolve_client_address,
 )
-from saas_os.api.dependencies import get_current_actor, get_current_session
+from saas_os.api.dependencies import (
+    get_current_actor,
+    get_current_session,
+    require_same_origin_browser_post,
+    revoke_cookie_session_for_logout,
+)
 from saas_os.api.errors import service_unavailable, unauthorized
 from saas_os.api.route_policy import public_route
 from saas_os.core.identity import (
@@ -339,6 +350,9 @@ async def callback(
             # ADR-0049: what the provider asserted about this login.
             multi_factor=identity.multi_factor,
             provider_authenticated_at=identity.authenticated_at,
+            # ADR-0064: kept (encrypted) only when the browser logout will
+            # send it to the provider as `id_token_hint`.
+            id_token_hint=id_token if config.post_logout_redirect_uri is not None else None,
         )
     except InactiveUserError:
         # ADR-0031: an inactive user authenticates at the IdP but never
@@ -382,6 +396,86 @@ async def logout(session: CoreSession = Depends(get_current_session)) -> Respons
     )
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     _clear_cookie(response, config, config.cookie_name)
+    return response
+
+
+# --- POST /auth/logout/redirect (ADR-0064) --------------------------------------
+
+
+@router.post(
+    "/logout/redirect",
+    status_code=status.HTTP_303_SEE_OTHER,
+    dependencies=[
+        Depends(
+            public_route(
+                "browser logout: a missing or stale session is still logged out; "
+                "same-origin is enforced in-handler for every request"
+            )
+        )
+    ],
+)
+async def logout_redirect(request: Request) -> Response:
+    """ADR-0064: the browser logout, posted by an ordinary HTML form.
+
+    1. Same-origin check (ADR-0044) on every request, cookie or not: 403
+       otherwise, and nothing changes.
+    2. The session the cookie names, if not yet revoked (valid, or expired:
+       its provider session may still be alive), is revoked and its stored
+       ID token taken out of the row, in one committed transaction -- before
+       anything else happens, so nothing that follows (an unreachable
+       provider, a failed discovery) can leave it usable.
+    3. The cookie is cleared on every outcome.
+    4. With `OIDC_POST_LOGOUT_REDIRECT_URI` configured and an
+       `end_session_endpoint` discovered: 303 to the provider, which ends its
+       own session for this client and returns the browser to that URI.
+       Otherwise: 303 to the same-origin local path.
+
+    The ID token appears only in that `Location` header -- never in a log,
+    a body, or a script-readable value. Idempotent: a repeat with no valid
+    session still clears the cookie and redirects; it revokes nothing."""
+    require_same_origin_browser_post(request)
+    config = _config()
+    logger.info("auth_logout_initiated", extra={"logout_route": "redirect"})
+    revocation = await revoke_cookie_session_for_logout(request.cookies.get(config.cookie_name))
+
+    id_token_hint: str | None = None
+    if revocation is not None:
+        id_token_hint = revocation.id_token_hint
+        logger.info(
+            "auth_logout_local_completed",
+            extra={"user_id": str(revocation.user_id), "session_id": str(revocation.session_id)},
+        )
+    else:
+        logger.info("auth_logout_local_completed", extra={"logout_session": "none"})
+
+    destination = config.post_logout_local_path
+    if config.post_logout_redirect_uri is not None:
+        try:
+            end_session_url = get_identity_provider().build_end_session_url(
+                post_logout_redirect_uri=config.post_logout_redirect_uri,
+                id_token_hint=id_token_hint,
+            )
+        except (OIDCConfigurationError, LookupError) as exc:
+            # Discovery failed: the provider is unreachable or misconfigured.
+            # The SaaS-OS session is already revoked; only the provider's
+            # session survives, as it would have before ADR-0064.
+            logger.warning(
+                "auth_logout_idp_unavailable", extra={"auth_failure": type(exc).__name__}
+            )
+            end_session_url = None
+        if end_session_url is not None:
+            destination = end_session_url
+            logger.info(
+                "auth_logout_idp_redirected",
+                extra={"logout_id_token_hint": id_token_hint is not None},
+            )
+        else:
+            logger.info("auth_logout_local_only", extra={"logout_reason": "no_end_session"})
+
+    response = RedirectResponse(url=destination, status_code=status.HTTP_303_SEE_OTHER)
+    _clear_cookie(response, config, config.cookie_name)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 

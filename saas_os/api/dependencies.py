@@ -139,7 +139,11 @@ from saas_os.core.identity.errors import (
     SessionRevokedError,
 )
 from saas_os.core.identity.models import Session
-from saas_os.core.identity.sessions import validate_session
+from saas_os.core.identity.sessions import (
+    LogoutRevocation,
+    revoke_session_for_logout,
+    validate_session,
+)
 from saas_os.core.platform_authority import (
     PlatformOperationTimeoutError,
     PlatformPermission,
@@ -389,6 +393,33 @@ def _cookie_mutation_guard(
     authentication's own 401."""
     if isinstance(cookie_token, str):
         _enforce_same_origin_for_cookie_mutation(request, authorization)
+
+
+def require_same_origin_browser_post(request: Request) -> None:
+    """ADR-0064: the ADR-0044 origin check, applied to a browser form post
+    whether or not it carries the session cookie. The browser logout route
+    is public (a stale or missing session still gets logged out), so the
+    check cannot wait for a cookie to be present: another site must never be
+    able to send the browser through a logout. 403 otherwise."""
+    _enforce_same_origin_for_cookie_mutation(request, None)
+
+
+async def revoke_cookie_session_for_logout(cookie_token: str | None) -> LogoutRevocation | None:
+    """ADR-0064: end the session the browser's cookie names, for the browser
+    logout. `None` when the cookie names none that is still unrevoked
+    (missing, unknown, already revoked). An expired session, or one of an
+    inactive user, is still ended (`revoke_session_for_logout()`). Behind
+    the same failed-credential limit as every authentication: a credential
+    refused too often is `429` before it is looked up, and an unknown or
+    revoked one counts as a refusal. Never reads an `Authorization` header:
+    the browser logout is a cookie flow only."""
+    if not isinstance(cookie_token, str) or not cookie_token:
+        return None
+    await _refuse_failing_credential(cookie_token)
+    revocation = revoke_session_for_logout(cookie_token)
+    if revocation is None:
+        await _count_credential_failure(cookie_token)
+    return revocation
 
 
 async def get_current_session(

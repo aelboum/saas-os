@@ -335,6 +335,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "issue_session": "global identity: core.sessions has no tenant_id",
         "validate_session": "global identity: core.sessions has no tenant_id",
         "revoke_session": "global identity: core.sessions has no tenant_id",
+        "revoke_session_for_logout": "global identity: core.sessions has no tenant_id (ADR-0064)",
         "purge_user_sessions": "global identity: core.sessions has no tenant_id",
         "list_user_verified_emails": "global identity: core.sessions has no tenant_id",
     },

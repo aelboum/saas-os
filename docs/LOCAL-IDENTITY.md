@@ -257,6 +257,7 @@ that takes precedence. An empty value counts as unset.
 | `OIDC_LOCAL_PROJECT_NAME` | `--project-name` | `saas-os` | ZITADEL project name |
 | `OIDC_LOCAL_APPLICATION_NAME` | `--application-name` | `saas-os-backend` | ZITADEL application name |
 | `ZITADEL_BOOTSTRAP_PAT_PATH` | `--pat-path` | `/bootstrap/bootstrap.pat` | PAT file written by ZITADEL (`ZITADEL_FIRSTINSTANCE_PATPATH`) |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | `--post-logout-redirect-uri` | *(none)* | ADR-0064: registered as a post-logout redirect URI -- the same variable the backend reads |
 
 Behavior, whatever the names:
 
@@ -272,12 +273,64 @@ Behavior, whatever the names:
 - **Existing applications are not modified**: if the application already
   exists, its registered redirect URI is left as it is. After changing
   `OIDC_REDIRECT_URI`, edit it in the ZITADEL console, or reset the
-  instance.
+  instance. Two narrow exceptions add a setting in place and keep every
+  other one: the Login V2 base URI (ADR-0025) and, when
+  `OIDC_POST_LOGOUT_REDIRECT_URI` is set and not yet registered, that one
+  post-logout URI (ADR-0064; URIs already registered are kept).
 - **Readiness**: every Management API call is retried (15 attempts, 2 s
   apart) to cover ZITADEL's projections lagging just after it reports
   healthy; after that the tool fails with a non-zero exit.
 - **Secrets**: the PAT is read from the shared volume and never printed or
   stored elsewhere. Nothing is written to any file.
+
+## Logout and the provider session (ADR-0064)
+
+`POST /auth/logout` ends only the SaaS-OS session. ZITADEL keeps its own
+browser session, so the next `/auth/login` signs the same person in without
+a password. `POST /auth/logout/redirect` (an HTML form post) also ends the
+ZITADEL session when `OIDC_POST_LOGOUT_REDIRECT_URI` is set.
+
+Set it up locally:
+
+1. Set `OIDC_POST_LOGOUT_REDIRECT_URI` in `.env`, on the application origin,
+   for example `http://localhost:8080/`.
+2. Run `saas-os-local-identity` again (or `docker compose run --rm
+   zitadel-bootstrap`): it adds the URI to the application's post-logout
+   URIs.
+3. Make sure `FIELD_ENCRYPTION_ACTIVE_KEY_VERSION` and
+   `FIELD_ENCRYPTION_KEY_<VERSION>` are set, restart the backend, and log in
+   again (older sessions have no stored ID token).
+
+In another ZITADEL (cloud or production): the application's **Redirect
+Settings**, "Post Logout URIs", must contain the identical value. Other
+providers: register the same value wherever the provider lists the client's
+post-logout redirect URIs; the provider must advertise
+`end_session_endpoint` in its discovery document.
+
+Provider compatibility:
+
+| Provider | `end_session_endpoint` | Result |
+|---|---|---|
+| ZITADEL v4.19.5, hosted login (local stack) | yes | Verified end to end (Chromium, 2026-11-20): the ZITADEL session ends; the next login shows the account as "Signed out" and asks for the password. |
+| ZITADEL with Login V2 (ADR-0025 topology) | yes | Not tested by this change. Section 11.5 of `docs/architecture/AUTHENTICATION-BOUNDARY-REVIEW.md` verified `end_session` with a hint ending the Login V2 session. |
+| A provider without `end_session_endpoint` | no | Logout is local only; the browser goes to the configured URI's path. |
+
+Troubleshooting:
+
+- **The browser stays on a provider page reading `post_logout_redirect_uri
+  invalid`.** The URI is not registered at the provider, or differs (a
+  trailing slash, `http` vs `https`, the port). The SaaS-OS session is
+  already ended; the provider's is not. Register the exact value.
+- **Login still works without a password after logout.** The sign-out
+  control posts to `/auth/logout` instead of `/auth/logout/redirect`; or
+  `OIDC_POST_LOGOUT_REDIRECT_URI` is unset; or the session was issued before
+  it was set and the provider needs a hint (log in again once).
+- **The backend logs `auth_id_token_hint_not_stored`.** No field-encryption
+  key is configured; logins work, but logouts send no `id_token_hint`.
+- **The backend logs `auth_logout_idp_unavailable`.** Discovery of the
+  provider failed at logout; the SaaS-OS session was still ended.
+- **`403` on logout.** The request did not come from the application's own
+  origin (ADR-0044): post a form from a page on `PUBLIC_APP_ORIGIN`.
 
 ## This is development-only
 

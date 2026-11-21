@@ -40,9 +40,10 @@ infrastructure (`docker-compose.yml`) -- a different concern this module
 never reads.
 
 `IdentityProvider` (below) is the small Protocol the HTTP auth layer
-(`saas_os/api/auth/routes.py`) actually depends on -- exactly the five operations
+(`saas_os/api/auth/routes.py`) actually depends on -- exactly the operations
 it calls, nothing about password management, MFA, account linking, user
-administration, refresh tokens, provider-side logout, management APIs,
+administration, refresh tokens, server-side provider logout (the browser
+redirect of ADR-0064 is the only provider logout), management APIs,
 SCIM, provisioning, social login, or authorization (all of that remains
 either non-existent or explicitly owned elsewhere: `saas_os/core/rbac` owns
 authorization, `saas_os/core/identity/sessions.py` owns the platform session).
@@ -212,6 +213,10 @@ class OIDCFlowEndpoints:
 
     authorization_endpoint: str
     token_endpoint: str
+    # ADR-0064: OpenID Connect RP-Initiated Logout 1.0, section 2.1. Optional
+    # in discovery -- `None` when the provider does not advertise one, and a
+    # logout is then local only.
+    end_session_endpoint: str | None = None
 
 
 def _fetch_discovery_document(issuer: str) -> dict[str, object]:
@@ -261,11 +266,22 @@ def _usable_endpoint(document: dict[str, object], name: str, *, issuer: str) -> 
     return value
 
 
+def _optional_endpoint(document: dict[str, object], name: str, *, issuer: str) -> str | None:
+    """An endpoint the provider may leave out of discovery: absent is
+    `None`; present, it must pass `_usable_endpoint()`'s scheme rule, so a
+    malformed or plain-HTTP value is a configuration error rather than a
+    silently skipped feature."""
+    if document.get(name) is None:
+        return None
+    return _usable_endpoint(document, name, issuer=issuer)
+
+
 def _discover_flow_endpoints(issuer: str) -> OIDCFlowEndpoints:
     document = _fetch_discovery_document(issuer)
     return OIDCFlowEndpoints(
         authorization_endpoint=_usable_endpoint(document, "authorization_endpoint", issuer=issuer),
         token_endpoint=_usable_endpoint(document, "token_endpoint", issuer=issuer),
+        end_session_endpoint=_optional_endpoint(document, "end_session_endpoint", issuer=issuer),
     )
 
 
@@ -306,9 +322,11 @@ class IdentityProvider(Protocol):
     shape and the same "prove the abstraction isn't leaky" discipline.
 
     Deliberately does not cover: password management, MFA, account
-    linking, user administration, refresh tokens, provider-side logout,
-    provider management APIs, SCIM, provisioning, social login, or
-    authorization -- none of these has a call site in this codebase.
+    linking, user administration, refresh tokens, server-side termination
+    of provider sessions, provider management APIs, SCIM, provisioning,
+    social login, or authorization -- none of these has a call site in this
+    codebase. Provider logout is covered only as the standard browser
+    redirect to the discovered `end_session_endpoint` (ADR-0064).
     `saas_os/core/identity/sessions.py` owns the platform session; `saas_os/core/rbac`
     owns authorization; neither is reachable through this Protocol.
     """
@@ -355,4 +373,17 @@ class IdentityProvider(Protocol):
         validation this codebase already performs (issuer/audience/
         expiry/subject/nonce/algorithm-allowlist/signature) -- this
         Protocol does not re-implement or weaken it."""
+        ...
+
+    def build_end_session_url(
+        self,
+        *,
+        post_logout_redirect_uri: str,
+        id_token_hint: str | None,
+    ) -> str | None:
+        """ADR-0064: the URL to send the browser to so the provider ends its
+        own session (OpenID Connect RP-Initiated Logout 1.0), or `None` when
+        the provider advertises no `end_session_endpoint`. Pure/no I/O.
+        `post_logout_redirect_uri` is the deployment's configured value,
+        never a browser-supplied one."""
         ...

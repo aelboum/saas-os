@@ -30,6 +30,14 @@ more -- what that path renders (an authenticated entry point, a dashboard,
 a tenant selector) is the product frontend's decision, and no SaaS-OS
 module knows or encodes it.
 
+`OIDC_POST_LOGOUT_REDIRECT_URI` (ADR-0064, optional) is where the identity
+provider returns the browser after `POST /auth/logout/redirect` ended its
+session. Unset, RP-initiated logout is off. Set, it must be an absolute
+URL on the application's own origin (`PUBLIC_APP_ORIGIN`, or the callback's
+origin), `https` in production, without credentials or a fragment: it is
+configuration, never read from a request, so it cannot become an open
+redirect. The provider must have the identical value registered.
+
 `AUTH_COOKIE_SECURE` defaults to true and can only be turned off outside
 `ENVIRONMENT=production` -- a production deployment cannot be configured
 into sending the session cookie over plain HTTP, so P2.3's TLS work
@@ -82,6 +90,10 @@ class AuthHttpConfig:
     environment: str = "development"
     trust_proxy_headers: bool = False
     public_app_origin: str | None = None
+    # ADR-0064: where the identity provider sends the browser after it ended
+    # its own session. `None` means RP-initiated logout is off: the browser
+    # logout route then ends only the SaaS-OS session.
+    post_logout_redirect_uri: str | None = None
 
     def __post_init__(self) -> None:
         # ADR-0024: when a browser-visible origin is declared, the callback
@@ -119,6 +131,51 @@ class AuthHttpConfig:
             raise AuthConfigurationError(
                 "AUTH_POST_LOGIN_PATH must be a same-origin absolute path (e.g. '/app')."
             )
+        if self.post_logout_redirect_uri is not None:
+            self._check_post_logout_redirect_uri(self.post_logout_redirect_uri)
+
+    def _check_post_logout_redirect_uri(self, value: str) -> None:
+        """ADR-0064: a fixed, configured URI on this application's own
+        origin -- the origin of `PUBLIC_APP_ORIGIN`, or of the callback when
+        only `OIDC_REDIRECT_URI` is set. Never browser-supplied, so it cannot
+        become an open redirect; and the identity provider only accepts it
+        when it is also registered there, character for character."""
+        name = "OIDC_POST_LOGOUT_REDIRECT_URI"
+        try:
+            parts = urlsplit(value)
+            parts.port  # noqa: B018 -- raises ValueError for an invalid port
+        except ValueError:
+            raise AuthConfigurationError(f"{name} must be an absolute http(s) URL.") from None
+        if parts.scheme not in ("https", "http") or not parts.hostname:
+            raise AuthConfigurationError(f"{name} must be an absolute http(s) URL.")
+        if parts.scheme == "http" and self.environment == "production":
+            raise AuthConfigurationError(f"{name} must use https in production.")
+        if parts.username is not None or parts.password is not None or parts.fragment:
+            raise AuthConfigurationError(f"{name} must not carry credentials or a fragment.")
+        if "\\" in value or any(ord(ch) < 0x21 for ch in value):
+            raise AuthConfigurationError(f"{name} must not contain spaces or control characters.")
+        if _origin_of(value) != self._application_origin():
+            raise AuthConfigurationError(
+                f"{name} must be on the application's own origin (PUBLIC_APP_ORIGIN, or the "
+                "origin of OIDC_REDIRECT_URI when PUBLIC_APP_ORIGIN is not set)."
+            )
+
+    def _application_origin(self) -> str | None:
+        if self.public_app_origin is not None:
+            return _origin_of(self.public_app_origin)
+        return _origin_of(self.redirect_uri)
+
+    @property
+    def post_logout_local_path(self) -> str:
+        """ADR-0064: where the browser logout route sends the browser itself
+        when no provider redirect is made -- the path and query of the
+        configured post-logout URI (same origin by the check above), or `/`.
+        Always a same-origin path, never an absolute URL."""
+        if self.post_logout_redirect_uri is None:
+            return "/"
+        parts = urlsplit(self.post_logout_redirect_uri)
+        path = parts.path or "/"
+        return f"{path}?{parts.query}" if parts.query else path
 
     @property
     def login_transaction_cookie_name(self) -> str:
@@ -134,6 +191,23 @@ class AuthHttpConfig:
         if self.public_app_origin is None:
             return None
         return normalize_public_app_origin(self.public_app_origin, environment=self.environment)
+
+
+def _origin_of(value: str) -> str | None:
+    """`scheme://host[:port]`, lower-cased, default port dropped; `None` if
+    `value` has no http(s) scheme and host."""
+    try:
+        parts = urlsplit(value.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    default_port = 443 if parts.scheme == "https" else 80
+    host = parts.hostname.lower()
+    if port is None or port == default_port:
+        return f"{parts.scheme}://{host}"
+    return f"{parts.scheme}://{host}:{port}"
 
 
 def _parse_bool(name: str, raw: str) -> bool:
@@ -201,6 +275,7 @@ def _auth_http_config_from_env() -> AuthHttpConfig:
         environment=environment,
         trust_proxy_headers=trust_proxy_headers_from_env(),
         public_app_origin=public_app_origin,
+        post_logout_redirect_uri=os.environ.get("OIDC_POST_LOGOUT_REDIRECT_URI") or None,
     )
 
 

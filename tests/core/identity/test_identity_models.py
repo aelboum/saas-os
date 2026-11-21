@@ -87,6 +87,8 @@ def test_sessions_has_expected_columns() -> None:
         # ADR-0049: what the identity provider asserted about the login.
         "multi_factor",
         "provider_authenticated_at",
+        # ADR-0064: the encrypted ID token kept for RP-initiated logout.
+        "id_token_hint_ciphertext",
         "created_at",
         "updated_at",
     }

@@ -904,6 +904,16 @@ stripping.
   redirected straight back. The provider session **remained active**, and the
   next `/auth/login` completed without a credential prompt (provider SSO).
 
+**Update 2026-11-20 (ADR-0064).** The text above records the state when it
+was written and is kept. SaaS-OS now offers provider logout as an opt-in
+browser redirect: `POST /auth/logout/redirect` sends the browser to the
+discovered `end_session_endpoint` with `id_token_hint`, after revoking the
+SaaS-OS session. With `LOGINV2_REQUIRED=false` (the hosted login of the
+local stack, ZITADEL v4.19.5) and a hint, a Chromium run ended the ZITADEL
+session: the next `/auth/login` listed the account as "Signed out" and asked
+for the password. `POST /auth/logout` is unchanged and still ends only the
+SaaS-OS session.
+
 ### 11.6 Login V2 build (LIVE VERIFIED / NOT YET VERIFIED)
 
 - The official Login V2 v4.19.0 release artifact is built for base path

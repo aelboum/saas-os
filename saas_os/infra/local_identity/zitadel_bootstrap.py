@@ -59,6 +59,10 @@ takes precedence):
   `saas-os-backend`).
 - `ZITADEL_BOOTSTRAP_PAT_PATH` -- PAT file path (default
   `/bootstrap/bootstrap.pat`).
+- `OIDC_POST_LOGOUT_REDIRECT_URI` -- optional (ADR-0064), the same setting
+  the backend reads. When set, it is registered as a post-logout redirect
+  URI of the application: created with it, or added in place to an existing
+  application's list (other entries are kept). When unset, nothing changes.
 - `ZITADEL_LOGIN_V2_BASE_URI` -- optional (ADR-0025). When set, the
   application's `loginVersion.loginV2.baseUri` is created with, or updated
   in place to, this value (never a second application). When unset, the
@@ -107,6 +111,8 @@ class BootstrapConfig:
     application_name: str = DEFAULT_APPLICATION_NAME
     pat_path: str = DEFAULT_PAT_PATH
     login_v2_base_uri: str | None = None
+    # ADR-0064: registered as a post-logout redirect URI when set.
+    post_logout_redirect_uri: str | None = None
     # `OIDC_CA_BUNDLE` / `OIDC_PROXY_URL`, the same settings the backend uses
     # for the same provider: never the environment's proxy or CA variables
     # (owner decision on ledger row 965, 2026-10-28).
@@ -146,6 +152,9 @@ def load_config(
     parser.add_argument("--application-name", help="Overrides OIDC_LOCAL_APPLICATION_NAME.")
     parser.add_argument("--pat-path", help="Overrides ZITADEL_BOOTSTRAP_PAT_PATH.")
     parser.add_argument("--login-v2-base-uri", help="Overrides ZITADEL_LOGIN_V2_BASE_URI.")
+    parser.add_argument(
+        "--post-logout-redirect-uri", help="Overrides OIDC_POST_LOGOUT_REDIRECT_URI."
+    )
     args = parser.parse_args(argv)
 
     def pick(flag: str | None, env_name: str) -> str | None:
@@ -182,6 +191,9 @@ def load_config(
         or DEFAULT_APPLICATION_NAME,
         pat_path=pick(args.pat_path, "ZITADEL_BOOTSTRAP_PAT_PATH") or DEFAULT_PAT_PATH,
         login_v2_base_uri=pick(args.login_v2_base_uri, "ZITADEL_LOGIN_V2_BASE_URI"),
+        post_logout_redirect_uri=pick(
+            args.post_logout_redirect_uri, "OIDC_POST_LOGOUT_REDIRECT_URI"
+        ),
         http=http,
     )
 
@@ -296,6 +308,7 @@ def application_request(
     application_name: str,
     redirect_uri: str,
     login_v2_base_uri: str | None = None,
+    post_logout_redirect_uri: str | None = None,
 ) -> dict:
     """The `CreateApplication` request body: a public PKCE client."""
     request = {
@@ -324,6 +337,8 @@ def application_request(
     }
     if login_v2_base_uri is not None:
         request["oidcConfiguration"]["loginVersion"] = login_version(login_v2_base_uri)
+    if post_logout_redirect_uri is not None:
+        request["oidcConfiguration"]["postLogoutRedirectUris"] = [post_logout_redirect_uri]
     return request
 
 
@@ -381,6 +396,34 @@ def userinfo_assertion_update_request(project_id: str, app: dict) -> dict:
     }
 
 
+def post_logout_redirect_update_request(
+    project_id: str, app: dict, post_logout_redirect_uri: str
+) -> dict:
+    """The `UpdateApplication` request body that adds ONE post-logout
+    redirect URI (ADR-0064) to an existing application, keeping the ones it
+    already has -- the same preserved fields as
+    `login_version_update_request()`, for the same reason."""
+    existing = app["oidcConfiguration"]
+    oidc_configuration = {
+        key: existing[key]
+        for key in (
+            "responseTypes",
+            "grantTypes",
+            "applicationType",
+            "authMethodType",
+            "clockSkew",
+        )
+        if key in existing
+    }
+    current = list(existing.get("postLogoutRedirectUris") or [])
+    oidc_configuration["postLogoutRedirectUris"] = [*current, post_logout_redirect_uri]
+    return {
+        "applicationId": app["applicationId"],
+        "projectId": project_id,
+        "oidcConfiguration": oidc_configuration,
+    }
+
+
 def _current_login_v2_base_uri(app: dict) -> str | None:
     login = app.get("oidcConfiguration", {}).get("loginVersion") or {}
     return (login.get("loginV2") or {}).get("baseUri")
@@ -392,6 +435,7 @@ def find_or_create_application(
     application_name: str,
     redirect_uri: str,
     login_v2_base_uri: str | None = None,
+    post_logout_redirect_uri: str | None = None,
 ) -> str:
     applications = list_all(
         client,
@@ -431,13 +475,33 @@ def find_or_create_application(
                     f"[bootstrap] application {application_name!r} now puts the email "
                     "claims in the ID token"
                 )
+            registered = app["oidcConfiguration"].get("postLogoutRedirectUris") or []
+            if post_logout_redirect_uri is not None and post_logout_redirect_uri not in registered:
+                _call(
+                    client,
+                    "POST",
+                    "/zitadel.application.v2.ApplicationService/UpdateApplication",
+                    json=post_logout_redirect_update_request(
+                        project_id, app, post_logout_redirect_uri
+                    ),
+                )
+                print(
+                    f"[bootstrap] application {application_name!r} now accepts the "
+                    f"post-logout redirect URI {post_logout_redirect_uri}"
+                )
             return client_id
 
     created = _call(
         client,
         "POST",
         "/zitadel.application.v2.ApplicationService/CreateApplication",
-        json=application_request(project_id, application_name, redirect_uri, login_v2_base_uri),
+        json=application_request(
+            project_id,
+            application_name,
+            redirect_uri,
+            login_v2_base_uri,
+            post_logout_redirect_uri,
+        ),
     )
     client_id = created["oidcConfiguration"]["clientId"]
     print(f"[bootstrap] created application {application_name!r}: client_id={client_id}")
@@ -470,6 +534,7 @@ def bootstrap(config: BootstrapConfig, transport: httpx.BaseTransport | None = N
             config.application_name,
             config.redirect_uri,
             config.login_v2_base_uri,
+            config.post_logout_redirect_uri,
         )
 
 
@@ -489,6 +554,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Redirect URI: {config.redirect_uri}")
     if config.login_v2_base_uri is not None:
         print(f"Login V2 base URI: {config.login_v2_base_uri}")
+    if config.post_logout_redirect_uri is not None:
+        print(f"Post-logout redirect URI: {config.post_logout_redirect_uri}")
     print(f"Set this in your .env (only if it changed):  OIDC_CLIENT_ID={client_id}")
     print("Leave OIDC_CLIENT_SECRET empty -- this is a public PKCE client.")
     print("=" * 72)
