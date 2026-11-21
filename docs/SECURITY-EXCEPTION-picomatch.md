@@ -1,6 +1,6 @@
 # Security-gate exception: `picomatch` GHSA-fc5q-39xc-vjpf
 
-Status: **APPLIED** from 2026-11-17, by decision of the repository owner, until **2026-12-17**. It is not a fix: no patched `picomatch` exists, and no dependency changed.
+Status: **CLOSED** on 2026-11-20: GitHub withdrew the advisory on 2026-11-18, and the entry was removed from `scripts/security-exceptions.json` (section 7). It was **APPLIED** from 2026-11-17, by decision of the repository owner, until then, with an expiry of 2026-12-17. It was never fixed: no patched `picomatch` exists, and no dependency changed. The rest of this document is the record of the exception as it applied.
 
 Where it lives: one entry in `scripts/security-exceptions.json`, enforced by `scripts/npm_audit_gate.py`, called from `scripts/check-security.sh`. Tests: `tests/architecture/test_npm_audit_gate.py`. The mechanism, its conditions and the options that were rejected for the earlier `braces` exception are in `docs/SECURITY-EXCEPTION-braces.md`, sections 4 to 6; they apply unchanged.
 
@@ -85,3 +85,15 @@ Commands run on 2026-11-17 in `frontend/`:
 - `npm view picomatch dist-tags`: `{ latest: '4.0.7' }`.
 - `npm view vitest@3.1.4 dependencies`: includes `tinyglobby`.
 - `gh api advisories/GHSA-fc5q-39xc-vjpf`: severity high, range `<= 4.0.7`, no patched version, not withdrawn.
+
+## 7. Closed 2026-11-20: the advisory was withdrawn
+
+On 2026-11-20 the security gate failed on this exception's stale-entry condition (section 5), in the security checks of pull request #290: `UNACCEPTED: GHSA-fc5q-39xc-vjpf (picomatch) -- exception is stale: the advisory is no longer reported; remove it from security-exceptions.json`. That is the designed behavior: an entry for an advisory that is no longer reported fails until it is deleted. Every CI run on main and on pull requests failed the same way until this change.
+
+- **Advisory source.** GitHub's advisory API (`gh api advisories/GHSA-fc5q-39xc-vjpf`) reports `withdrawn_at` 2026-11-18T15:38:56Z (updated 2026-11-19T16:07:41Z). Severity high, range `<= 4.0.7`, no patched version: the record is unchanged except for the withdrawal.
+- **`npm audit` in `frontend/`.** It reports no high or critical advisory, and nothing for `picomatch`. It reports seven moderate ones (`minimatch`, the TypeScript ESLint packages, `next`), below the gate's threshold, which the gate never blocked; `npm audit --omit=dev` reports one of them, moderate, in `next`.
+- **Installed tree.** Unchanged: `picomatch@2.3.2` and `picomatch@4.0.7` on the same development-only paths (section 2); `npm view picomatch dist-tags` still gives `latest: 4.0.7`. The lockfile and every dependency version are as before.
+- **Change.** The one entry was removed from `scripts/security-exceptions.json`, which now holds `"npm": []`. The gate itself, its threshold and every other check are unchanged.
+- **Tests.** `tests/architecture/test_npm_audit_gate.py` asserts that the checked-in file holds no exception, and that with it the `picomatch` and `braces` advisories would block the gate if either were ever reported again. The exception controls of the mechanism (expiry, production dependencies, a non-breaking fix, a stale entry, other advisories and packages) keep running against the former `braces` entry written to a temporary file.
+
+No exception is accepted now. A new one needs the repository owner's decision.
