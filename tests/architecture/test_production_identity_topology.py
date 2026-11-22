@@ -766,6 +766,16 @@ def _example_variables(name: str) -> list[str]:
     return [line.split("=", 1)[0] for line in text.splitlines() if line and line[0].isupper()]
 
 
+@pytest.mark.parametrize("name", [".env.example", ".env.app.example"])
+def test_no_variable_is_assigned_twice_in_an_env_example(name: str) -> None:
+    """A copied `.env` keeps the last assignment, so a second one silently
+    overrides the first (until 2026-11-22 the production section of
+    `.env.example` overrode the local ZITADEL admin and database values)."""
+    names = _example_variables(name)
+    assert names, f"no variables parsed from {name}"
+    assert sorted({n for n in names if names.count(n) > 1}) == []
+
+
 def test_the_application_env_example_carries_no_identity_setting() -> None:
     names = _example_variables(".env.app.example")
     assert names, "no variables parsed from .env.app.example"
