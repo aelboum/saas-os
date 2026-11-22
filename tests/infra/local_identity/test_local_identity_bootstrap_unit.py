@@ -85,7 +85,9 @@ class FakeZitadel:
         if path.endswith("/UpdateApplication"):
             # ZITADEL v4.19.0-v4.19.5 semantics (convert/oidc_app.go): omitted fields
             # are unchanged, EXCEPT empty response/grant types (reset to their
-            # defaults) and an omitted clock skew (reset to zero).
+            # defaults), an omitted clock skew (reset to zero) and an omitted
+            # login version (reset to the default, Login V1; verified live on
+            # v4.19.5, 2026-11-22).
             self.update_requests.append(body)
             app = next(a for a in self.applications if a["applicationId"] == body["applicationId"])
             update = body["oidcConfiguration"]
@@ -97,6 +99,8 @@ class FakeZitadel:
                 oidc["grantTypes"] = ["OIDC_GRANT_TYPE_AUTHORIZATION_CODE"]
             if "clockSkew" not in update:
                 oidc["clockSkew"] = "0s"
+            if "loginVersion" not in update:
+                oidc.pop("loginVersion", None)
             return httpx.Response(200, json={})
         return httpx.Response(404)
 
@@ -199,7 +203,7 @@ def test_an_existing_application_without_the_email_claims_is_updated_once(
 
     (update,) = fake.update_requests
     assert update["oidcConfiguration"]["idTokenUserinfoAssertion"] is True
-    assert "loginVersion" not in update["oidcConfiguration"]  # unchanged
+    assert update["oidcConfiguration"]["loginVersion"] == {"loginV1": {}}  # re-sent as is
     after = fake.applications[0]["oidcConfiguration"]
     assert after.pop("idTokenUserinfoAssertion") is True
     assert after == before
@@ -720,3 +724,91 @@ def test_existing_application_gets_the_post_logout_uri_added_once(pat_file: Path
     assert after.pop("postLogoutRedirectUris") == ["https://other.example.test/", _POST_LOGOUT]
     before.pop("postLogoutRedirectUris")
     assert after == before  # every other setting kept
+
+
+# --- Every update keeps the application's login version ---------------------
+# ZITADEL resets an omitted login version to Login V1 (verified live on v4.19.5,
+# 2026-11-22). Before this was handled, adding a post-logout redirect URI to a
+# Login V2 application switched it back to Login V1.
+
+
+def _login_v2_application(fake: FakeZitadel, pat_file: Path) -> zb.BootstrapConfig:
+    config = zb.BootstrapConfig(
+        zitadel_url="http://z", pat_path=str(pat_file), login_v2_base_uri=LOGIN_V2
+    )
+    zb.bootstrap(config, transport=fake.transport())
+    assert fake.applications[0]["oidcConfiguration"]["loginVersion"] == {
+        "loginV2": {"baseUri": LOGIN_V2}
+    }
+    return config
+
+
+def test_adding_a_post_logout_uri_keeps_login_v2(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    _login_v2_application(fake, pat_file)
+    config = zb.BootstrapConfig(
+        zitadel_url="http://z",
+        pat_path=str(pat_file),
+        login_v2_base_uri=LOGIN_V2,
+        post_logout_redirect_uri=_POST_LOGOUT,
+    )
+    zb.bootstrap(config, transport=fake.transport())
+    (update,) = fake.update_requests
+    assert update["oidcConfiguration"]["loginVersion"] == {"loginV2": {"baseUri": LOGIN_V2}}
+    oidc = fake.applications[0]["oidcConfiguration"]
+    assert oidc["loginVersion"] == {"loginV2": {"baseUri": LOGIN_V2}}
+    assert oidc["postLogoutRedirectUris"] == [_POST_LOGOUT]
+
+
+def test_adding_a_post_logout_uri_without_a_login_v2_setting_keeps_login_v2(
+    pat_file: Path,
+) -> None:
+    """The operator's run sets only the post-logout URI (no Login V2 base
+    URI): the application keeps the Login V2 it already has."""
+    fake = FakeZitadel()
+    _login_v2_application(fake, pat_file)
+    config = zb.BootstrapConfig(
+        zitadel_url="http://z", pat_path=str(pat_file), post_logout_redirect_uri=_POST_LOGOUT
+    )
+    zb.bootstrap(config, transport=fake.transport())
+    assert fake.applications[0]["oidcConfiguration"]["loginVersion"] == {
+        "loginV2": {"baseUri": LOGIN_V2}
+    }
+
+
+def test_turning_on_the_userinfo_assertion_keeps_login_v2(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    config = _login_v2_application(fake, pat_file)
+    del fake.applications[0]["oidcConfiguration"]["idTokenUserinfoAssertion"]
+    zb.bootstrap(config, transport=fake.transport())
+    oidc = fake.applications[0]["oidcConfiguration"]
+    assert oidc["idTokenUserinfoAssertion"] is True
+    assert oidc["loginVersion"] == {"loginV2": {"baseUri": LOGIN_V2}}
+
+
+def test_one_run_moving_to_login_v2_and_adding_updates_ends_on_login_v2(
+    pat_file: Path,
+) -> None:
+    """One run that first moves an application to Login V2 and then makes
+    the two other updates: the later updates send the new login version,
+    not the one listed before the run."""
+    fake = FakeZitadel()
+    legacy = zb.BootstrapConfig(zitadel_url="http://z", pat_path=str(pat_file))
+    zb.bootstrap(legacy, transport=fake.transport())
+    oidc = fake.applications[0]["oidcConfiguration"]
+    del oidc["idTokenUserinfoAssertion"]
+    oidc["loginVersion"] = {"loginV1": {}}
+    config = zb.BootstrapConfig(
+        zitadel_url="http://z",
+        pat_path=str(pat_file),
+        login_v2_base_uri=LOGIN_V2,
+        post_logout_redirect_uri=_POST_LOGOUT,
+    )
+    zb.bootstrap(config, transport=fake.transport())
+    assert len(fake.update_requests) == 3
+    for update in fake.update_requests:
+        assert update["oidcConfiguration"]["loginVersion"] == {"loginV2": {"baseUri": LOGIN_V2}}
+    oidc = fake.applications[0]["oidcConfiguration"]
+    assert oidc["loginVersion"] == {"loginV2": {"baseUri": LOGIN_V2}}
+    assert oidc["idTokenUserinfoAssertion"] is True
+    assert oidc["postLogoutRedirectUris"] == [_POST_LOGOUT]
