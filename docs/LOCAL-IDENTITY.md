@@ -312,7 +312,7 @@ Provider compatibility:
 | Provider | `end_session_endpoint` | Result |
 |---|---|---|
 | ZITADEL v4.19.5, hosted login (local stack) | yes | Verified end to end (Chromium, 2026-11-20): the ZITADEL session ends; the next login shows the account as "Signed out" and asks for the password. |
-| ZITADEL with Login V2 (ADR-0025 topology) | yes | Not tested by this change. Section 11.5 of `docs/architecture/AUTHENTICATION-BOUNDARY-REVIEW.md` verified `end_session` with a hint ending the Login V2 session. |
+| ZITADEL v4.19.5 with Login V2 (ADR-0025 topology) | yes | Verified end to end (Chromium, 2026-11-22, disposable production-topology stack): the ZITADEL session ends; the next login lists the account and asks for the password. An ID token past its `exp` is accepted as hint. `docs/P-ROADMAP.md`, ADR-0064 entry. |
 | A provider without `end_session_endpoint` | no | Logout is local only; the browser goes to the configured URI's path. |
 
 Troubleshooting:
