@@ -10,7 +10,18 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # fb842ff is `main` after pull request #280 (2026-11-16), released as
+    # cdede95 is `main` after pull request #287 (2026-11-17), released as
+    # v0.15.0 (CHANGELOG.md). Since fb842ff (#281-#288): no migration (head
+    # e1f5a8c3b7d9), the public package saas_os.inference.settings, which
+    # reference_consumer/ai_settings.py uses, and four system jobs off the
+    # worker's event loop.
+    # `saas-os-update check`: REVIEW_REQUIRED (17 commits, 36 changed paths;
+    # architecture, authorization, dependency toolchain, documentation,
+    # internal, provider boundary, public API and tests); the paths are
+    # listed in docs/P-ROADMAP.md. The pinned-SHA install and import were
+    # checked for this move on 2026-11-22; the tests were not rerun (same
+    # place).
+    # Before it, fb842ff is `main` after pull request #280 (2026-11-16), released as
     # v0.14.0 (CHANGELOG.md). Since a2a9384 (#268-#280): four migrations
     # (head e1f5a8c3b7d9), tenant audit rows record a user initiator as a
     # reference, legal holds on audit references and the expiry report.
@@ -18,7 +29,7 @@ dependencies = [
     # architecture, authorization, dependency toolchain, documentation,
     # internal, migration, public API, tenant RLS, tests and unknown); the
     # paths are listed in docs/P-ROADMAP.md. The pinned-SHA install and
-    # import were checked for this move on 2026-11-17; the tests were not
+    # import were checked for that move on 2026-11-17; the tests were not
     # rerun (same place).
     # Before it, a2a9384 is `main` after pull request #267 (2026-11-14), released as
     # v0.13.0 (CHANGELOG.md). Since c17c7b4 (#262-#267): one migration (head
@@ -221,5 +232,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@fb842fff4b2b24a3a4bf25f3000aedae46dce5aa",
+    "saas-os @ git+https://github.com/aelboum/saas-os@cdede956dd884fc816b234f1b546ce3b983b4efc",
 ]
