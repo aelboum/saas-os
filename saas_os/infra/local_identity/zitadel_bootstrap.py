@@ -342,17 +342,20 @@ def application_request(
     return request
 
 
-def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: str) -> dict:
-    """The `UpdateApplication` request body that changes ONLY the login
-    version of an existing application.
+def _preserved_oidc_fields(app: dict) -> dict:
+    """The OIDC fields every `UpdateApplication` request re-sends exactly as
+    the application has them, so that an update changes only what it means
+    to change.
 
-    ZITADEL v4.19.0 (that file is unchanged at v4.19.5) treats omitted OIDC
-    fields as "no change", except that an empty response/grant type list is
-    replaced by its default and an omitted clock skew by zero
-    (internal/api/grpc/application/v2/convert/oidc_app.go), so those are
-    re-sent exactly as the application currently has them."""
+    ZITADEL v4.19.0 (that file is unchanged at v4.19.5) replaces an empty
+    response/grant type list by its default and an omitted clock skew by
+    zero (internal/api/grpc/application/v2/convert/oidc_app.go). It also
+    resets an omitted login version to the default, Login V1: verified live
+    on v4.19.5 on 2026-11-22, where adding a post-logout redirect URI
+    without it switched a Login V2 application back to Login V1. So the
+    login version is re-sent too, when the application has one."""
     existing = app["oidcConfiguration"]
-    oidc_configuration = {
+    preserved = {
         key: existing[key]
         for key in (
             "responseTypes",
@@ -363,6 +366,17 @@ def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: 
         )
         if key in existing
     }
+    if existing.get("loginVersion"):
+        preserved["loginVersion"] = existing["loginVersion"]
+    return preserved
+
+
+def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: str) -> dict:
+    """The `UpdateApplication` request body that changes ONLY the login
+    version of an existing application.
+
+    The fields `_preserved_oidc_fields()` re-sends are kept as they are."""
+    oidc_configuration = _preserved_oidc_fields(app)
     oidc_configuration["loginVersion"] = login_version(login_v2_base_uri)
     return {
         "applicationId": app["applicationId"],
@@ -374,20 +388,8 @@ def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: 
 def userinfo_assertion_update_request(project_id: str, app: dict) -> dict:
     """The `UpdateApplication` request body that turns on
     `idTokenUserinfoAssertion` (ADR-0046) for an application created before
-    it was set, changing nothing else -- the same preserved fields as
-    `login_version_update_request()`, for the same reason."""
-    existing = app["oidcConfiguration"]
-    oidc_configuration = {
-        key: existing[key]
-        for key in (
-            "responseTypes",
-            "grantTypes",
-            "applicationType",
-            "authMethodType",
-            "clockSkew",
-        )
-        if key in existing
-    }
+    it was set, changing nothing else (`_preserved_oidc_fields()`)."""
+    oidc_configuration = _preserved_oidc_fields(app)
     oidc_configuration["idTokenUserinfoAssertion"] = True
     return {
         "applicationId": app["applicationId"],
@@ -401,21 +403,9 @@ def post_logout_redirect_update_request(
 ) -> dict:
     """The `UpdateApplication` request body that adds ONE post-logout
     redirect URI (ADR-0064) to an existing application, keeping the ones it
-    already has -- the same preserved fields as
-    `login_version_update_request()`, for the same reason."""
-    existing = app["oidcConfiguration"]
-    oidc_configuration = {
-        key: existing[key]
-        for key in (
-            "responseTypes",
-            "grantTypes",
-            "applicationType",
-            "authMethodType",
-            "clockSkew",
-        )
-        if key in existing
-    }
-    current = list(existing.get("postLogoutRedirectUris") or [])
+    already has and changing nothing else (`_preserved_oidc_fields()`)."""
+    oidc_configuration = _preserved_oidc_fields(app)
+    current = list(app["oidcConfiguration"].get("postLogoutRedirectUris") or [])
     oidc_configuration["postLogoutRedirectUris"] = [*current, post_logout_redirect_uri]
     return {
         "applicationId": app["applicationId"],
@@ -464,6 +454,15 @@ def find_or_create_application(
                     f"[bootstrap] application {application_name!r} now uses Login V2 at "
                     f"{login_v2_base_uri}"
                 )
+                # Later updates in this run re-send the login version
+                # (`_preserved_oidc_fields`): they must send the new one.
+                app = {
+                    **app,
+                    "oidcConfiguration": {
+                        **app["oidcConfiguration"],
+                        "loginVersion": login_version(login_v2_base_uri),
+                    },
+                }
             if app["oidcConfiguration"].get("idTokenUserinfoAssertion") is not True:
                 _call(
                     client,
