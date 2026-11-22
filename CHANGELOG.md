@@ -2,9 +2,51 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.16.0 (2026-11-22)
+
+The merge commit of pull request #294, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.16.0` resolves to that merge commit before pinning it, and with `git tag -v v0.16.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.15.0: `cdede956dd884fc816b234f1b546ce3b983b4efc`.
+
+It contains everything since v0.15.0 (`cdede95`): pull requests #289 to #293 and this release. The main change is OpenID Connect RP-initiated logout (ADR-0064, finding P2-F1): a browser sign-out can now also end the identity provider's session. There is **one migration** (the head moves from `e1f5a8c3b7d9` to `8db003ab849e`), one new optional setting and no new permission. A minor release, not a patch: it adds a migration and changes a public signature (a new method on the `IdentityProvider` protocol) (ADR-0015, version numbers before 1.0).
+
+**Support:** 0.16 is fully supported. 0.15 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
+
+**Deployment steps (details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.15.0 to v0.16.0"):** run SaaS OS's migrations to `8db003ab849e` before starting the new code. Make sure the product's environment resolves FastAPI 0.142 or later. Nothing else is required: RP-initiated logout stays off until a deployment sets `OIDC_POST_LOGOUT_REDIRECT_URI`.
+
+**Added: RP-initiated logout** (#290; ADR-0064, `docs/CONSUMER-GUIDE.md` section 9, "Signing out"). Opt-in per deployment, and SaaS OS stays a pure OIDC relying party: no provider API call, nothing provider-specific.
+
+- New optional setting `OIDC_POST_LOGOUT_REDIRECT_URI`: an absolute URL on the application's own origin (`https` in production), validated at configuration; a bad value fails the auth configuration closed. Unset, every behaviour is as before.
+- `end_session_endpoint` is read from the provider's discovery document. Absent, a logout stays local.
+- When the setting is present, the login callback keeps the ID token of that login on the session, encrypted with the field-encryption key and bound to the row's id. Every revocation clears it. Without a field-encryption key the login still succeeds and the logout sends no `id_token_hint`.
+- New route `POST /auth/logout/redirect` for an HTML form. The same-origin check runs first (`403` otherwise). The cookie's session, also an expired one, is revoked and committed before anything else, and the cookie is cleared. Then a `303` to the provider with `client_id`, `post_logout_redirect_uri` and, when stored, `id_token_hint`; or to the configured path, or `/`. `POST /auth/logout` is unchanged (`204`) and now also clears the stored hint.
+- `saas-os-local-identity` registers the post-logout URI at the local ZITADEL when the variable is set.
+- Evidence is structured log events (`auth_logout_initiated`, `auth_logout_local_completed`, `auth_logout_idp_redirected`, `auth_logout_idp_unavailable`, `auth_logout_local_only`), never a token or the end-session URL.
+
+**Migration `8db003ab849e`** (#290): the nullable column `core.sessions.id_token_hint_ciphertext`. A catalog-only `ADD COLUMN` (a brief ACCESS EXCLUSIVE lock, no rewrite); existing sessions get `NULL`, which means no hint. No GRANT is needed. The downgrade drops the column, discarding only the stored ciphertexts.
+
+**Changed: FastAPI's own telemetry is off in `build_platform_app`** (#292). FastAPI 0.142 and later opens its own request span once a global tracer provider exists, which `configure_tracing()` installs, and that span copied the query string verbatim: on `/auth/callback`, the OIDC authorization code and state. The application now passes `telemetry=` with FastAPI's tracing, metrics, logs, operation spans and environment auto-configuration off. The one request span is `CorrelationIdMiddleware`'s, which records no query string. A product no longer gets FastAPI's own spans, and `OTEL_*` or `FASTAPI_OTEL_*` variables no longer make FastAPI attach exporters. The dependency floor moves from `fastapi>=0.115` to `fastapi>=0.142`, the first release with that argument; `constraints.txt` still pins 0.162.0.
+
+**Public API:** one changed signature, the rest additions (`git diff v0.15.0 -- tests/architecture/public_api_snapshot.txt`):
+
+- `IdentityProvider` (a protocol) gains `build_end_session_url(*, post_logout_redirect_uri, id_token_hint) -> str | None`. A product that implements `IdentityProvider` itself, for example in tests, must add it; returning `None` keeps logout local.
+- `OIDCFlowEndpoints` gains `end_session_endpoint` (default `None`); `issue_session` gains the keyword `id_token_hint` (default `None`); the `Session` model gains `id_token_hint_ciphertext`.
+- New: `revoke_session_for_logout`, `LogoutRevocation` and `build_end_session_url` in `saas_os.core.identity`, and `OIDCIdentityProvider.build_end_session_url`.
+
+**Security gate:** #291 removes the `picomatch` exception that v0.15.0 added (#288). GitHub withdrew advisory GHSA-fc5q-39xc-vjpf on 2026-11-18, and the gate then failed on the stale exception, as designed. `scripts/security-exceptions.json` now holds no exception (`"npm": []`). No dependency or lockfile changed.
+
+**Documentation and tests only:** #289 (v0.15.0 recorded as published); #293 (`.env.example` assigns each ZITADEL variable once: the production section had overridden six local values in a copied `.env`, so the local admin password was not the one documented; an architecture test now refuses a variable assigned twice in either env example).
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with #292 (the FastAPI floor) and with this release (the version).
+
+**Known limits:**
+
+- RP-initiated logout is verified end to end against ZITADEL's hosted login only; Login V2 (the ADR-0025 topology) is not verified (`docs/P-ROADMAP.md`, ADR-0064 entry);
+- a logout ends only the current browser's SaaS OS session, not the user's other sessions; no front- or back-channel logout.
+
+The example pins move to v0.15.0 (`cdede95`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `cdede95` (v0.15.0)"). Neither example implements `IdentityProvider` or sets `OIDC_POST_LOGOUT_REDIRECT_URI`. Migration head: `8db003ab849e`. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.15.0 to v0.16.0".
+
 ## v0.15.0 (2026-11-17)
 
-The merge commit of pull request #287, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.15.0` resolves to that merge commit before pinning it, and with `git tag -v v0.15.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.14.0: `fb842fff4b2b24a3a4bf25f3000aedae46dce5aa`.
+Commit `cdede956dd884fc816b234f1b546ce3b983b4efc`, the merge commit of pull request #287, the release pull request (ADR-0015, "One pull request per release"). Main CI run 44171921719 passed on this commit. Check that the tag `v0.15.0` resolves to that SHA before pinning it, and with `git tag -v v0.15.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.14.0: `fb842fff4b2b24a3a4bf25f3000aedae46dce5aa`.
 
 It contains everything since v0.14.0 (`fb842ff`): pull requests #281 to #286, #288 and this release. The main change is a public Python API for a tenant's own AI settings (Gap 20 Stage 8, issue #285). There is **no migration** (the head stays `e1f5a8c3b7d9`), no new setting and no new permission. A minor release, not a patch: it adds a public package (ADR-0015, version numbers before 1.0).
 

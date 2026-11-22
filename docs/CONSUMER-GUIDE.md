@@ -1065,14 +1065,18 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 5. **Check the tag's signature** before pinning: `git tag -v v0.15.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 6. **Rolling back** to v0.14.0: move the pin back. There is no migration to undo. Settings a tenant saved through the new package stay in the tables that v0.14.0 already had and keep their effect there.
 
-### Unreleased: RP-initiated logout (ADR-0064)
+### From v0.15.0 to v0.16.0
 
-On `main` after v0.15.0, not yet in a release.
+`saas-os-update check` reports `REVIEW_REQUIRED` for this move (exit 20, policy version 4; checked on 2026-11-22 against `main` at `a45a5ac`, the last commit before the release pull request, from a copy of the scaffold pinned at v0.15.0 `cdede95`: 14 commits, 43 changed paths: tests 14, authorization 9, documentation 7, architecture 6, dependency toolchain 3, migration 1, provider boundary 1, public API 1, unknown 1). Review is required for the migration, the changed identity and session code, the new public signature and the FastAPI floor.
 
-1. **Migrate first.** Run SaaS OS's migrations to `8db003ab849e` before starting the new code: one nullable column on `core.sessions`, catalog-only.
-2. **Nothing changes until you opt in.** Without `OIDC_POST_LOGOUT_REDIRECT_URI`, both logout routes end only the SaaS OS session, and no ID token is stored.
-3. **If you implement `IdentityProvider` yourself** (tests, a custom adapter), add `build_end_session_url(*, post_logout_redirect_uri, id_token_hint) -> str | None`; returning `None` keeps logout local.
-4. **To opt in:** follow "Signing out" in section 9.
+1. **Migrate first.** Run SaaS OS's migrations to `8db003ab849e` before starting the new code: one nullable column, `core.sessions.id_token_hint_ciphertext`, catalog-only (a brief ACCESS EXCLUSIVE lock on `core.sessions`, no rewrite). Code from v0.15.0 never reads the column and runs unchanged against it.
+2. **FastAPI 0.142 or later** (#292). The floor moved from `fastapi>=0.115`; a product that pins FastAPI lower must raise it. `build_platform_app` now switches FastAPI's own telemetry off, so a product no longer gets FastAPI's request spans and FastAPI no longer reads `OTEL_*` or `FASTAPI_OTEL_*` variables to attach exporters; the request span is `CorrelationIdMiddleware`'s. If you relied on FastAPI's spans, add your own instrumentation.
+3. **Nothing changes until you opt in to RP-initiated logout** (#290, ADR-0064). Without `OIDC_POST_LOGOUT_REDIRECT_URI`, both logout routes end only the SaaS OS session, and no ID token is stored.
+4. **If you implement `IdentityProvider` yourself** (tests, a custom adapter), add `build_end_session_url(*, post_logout_redirect_uri, id_token_hint) -> str | None`; returning `None` keeps logout local. This is the one changed public signature; the other public API changes are additions (`OIDCFlowEndpoints.end_session_endpoint` and the `issue_session` keyword `id_token_hint` both default to `None`).
+5. **To opt in:** follow "Signing out" in section 9: set `OIDC_POST_LOGOUT_REDIRECT_URI`, register the identical URI at the provider, configure field encryption, and point the sign-out button at a form post to `/auth/logout/redirect`. Sessions issued before the upgrade have no stored ID token; their logout sends no hint.
+6. **No new permission.** The `picomatch` exception of v0.15.0 is gone (#291); nothing that ships changes.
+7. **Check the tag's signature** before pinning: `git tag -v v0.16.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
+8. **Rolling back** to v0.15.0: move the pin back; v0.15.0 runs against the new column. To remove it as well, downgrade `8db003ab849e` to `e1f5a8c3b7d9` (drops the column and only the stored ID tokens). v0.15.0 has no `/auth/logout/redirect`, so point the sign-out button back at `POST /auth/logout` first.
 
 ## 15. Product deployment checklist
 
