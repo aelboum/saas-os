@@ -1,6 +1,6 @@
 # ADR-0064: OpenID Connect RP-initiated logout
 
-Status: Accepted (2026-11-20, owner work package "SaaS-OS – Implement RP-Initiated Logout (P2-F1)"). Implemented on branch `feat/rp-initiated-logout`; not merged, not released.
+Status: Accepted (2026-11-20, owner work package "SaaS-OS – Implement RP-Initiated Logout (P2-F1)"). Implemented on branch `feat/rp-initiated-logout`; merged on 2026-11-21 as pull request #290 (`3f3a972`); released in v0.16.0 (2026-11-22).
 Date: 2026-11-20
 Supersedes / Superseded by: none. Narrows one sentence of ADR-0023 and of `docs/architecture/AUTHENTICATION-BOUNDARY-REVIEW.md` section 11.5 (below); ADR-0026 stays rejected.
 Related: ADR-0005 (identity build vs buy), ADR-0019 (field encryption), ADR-0023 (provider-neutral identity boundary), ADR-0024 (single-origin runtime), ADR-0025 (same-origin ZITADEL Login V2), ADR-0026 (rejected embedded login), ADR-0044 (same-origin check for cookie mutations), ADR-0046 (verified email on the session).
