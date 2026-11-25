@@ -2,9 +2,33 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.16.1 (2026-11-25)
+
+The merge commit of pull request #297, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.16.1` resolves to that merge commit before pinning it, and with `git tag -v v0.16.1` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.16.0: `f073a2721c41fb455736217c48b24d0081cd7f5c`.
+
+It contains everything since v0.16.0 (`f073a27`): pull requests #295 and #296 and this release. A patch release: one fix in the local identity bootstrap. There is no migration (the head stays `8db003ab849e`), no changed public signature, no new setting and no new deployment step.
+
+**Support:** Unchanged: 0.16 is fully supported.
+
+**Fixed: the local identity bootstrap keeps Login V2** (#296). `saas-os-local-identity`, and the `zitadel-bootstrap` service that runs it, switched an existing Login V2 application back to Login V1 when it added the post-logout redirect URI of v0.16.0 (`OIDC_POST_LOGOUT_REDIRECT_URI`, ADR-0064) or turned on `idTokenUserinfoAssertion` (ADR-0046). Those `UpdateApplication` requests left out `loginVersion`, and ZITADEL v4.19.5 resets a left-out login version to the default. Logins then went to `/ui/login` instead of `/ui/v2/login` (against ADR-0025), with no error. Every update request now sends the application's current login version again, and a run that first moves the application to Login V2 sends the new version in its later updates. The fix was reproduced and verified against a live ZITADEL v4.19.5. Only the bootstrap module changed (`saas_os/infra/local_identity/zitadel_bootstrap.py`); the library's runtime code did not.
+
+**Verified: RP-initiated logout with Login V2** (#296, documentation). The end-to-end run of ADR-0064 against ZITADEL v4.19.5 with Login V2 passed 42 of 42 checks on a disposable stack, including an expired ID token as `id_token_hint`. The v0.16.0 known limit "Login V2 is not verified" is closed (`docs/P-ROADMAP.md`, ADR-0064 entry).
+
+**Documentation only:** #295 (v0.16.0 recorded as published).
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed only with this release (the version).
+
+**Known limits:**
+
+- RP-initiated logout is not tested against a real provider without `end_session_endpoint` (integration tests cover that case);
+- `docker-compose.prod.yml` does not pass `OIDC_POST_LOGOUT_REDIRECT_URI` to `zitadel-bootstrap`, so in that topology the operator registers the post-logout URI at ZITADEL by hand (`docs/CONSUMER-GUIDE.md` section 9; `docs/P-ROADMAP.md`, deferred row);
+- a logout ends only the current browser's SaaS OS session, not the user's other sessions; no front- or back-channel logout.
+
+The example pins move to v0.16.0 (`f073a27`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `f073a27` (v0.16.0)"). Migration head: `8db003ab849e`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.16.0 to v0.16.1".
+
 ## v0.16.0 (2026-11-22)
 
-The merge commit of pull request #294, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.16.0` resolves to that merge commit before pinning it, and with `git tag -v v0.16.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.15.0: `cdede956dd884fc816b234f1b546ce3b983b4efc`.
+Commit `f073a2721c41fb455736217c48b24d0081cd7f5c`, the merge commit of pull request #294, the release pull request (ADR-0015, "One pull request per release"). Main CI run 45033691842 passed on this commit. Check that the tag `v0.16.0` resolves to that SHA before pinning it, and with `git tag -v v0.16.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.15.0: `cdede956dd884fc816b234f1b546ce3b983b4efc`.
 
 It contains everything since v0.15.0 (`cdede95`): pull requests #289 to #293 and this release. The main change is OpenID Connect RP-initiated logout (ADR-0064, finding P2-F1): a browser sign-out can now also end the identity provider's session. There is **one migration** (the head moves from `e1f5a8c3b7d9` to `8db003ab849e`), one new optional setting and no new permission. A minor release, not a patch: it adds a migration and changes a public signature (a new method on the `IdentityProvider` protocol) (ADR-0015, version numbers before 1.0).
 

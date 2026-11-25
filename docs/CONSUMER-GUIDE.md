@@ -1078,6 +1078,15 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 7. **Check the tag's signature** before pinning: `git tag -v v0.16.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 8. **Rolling back** to v0.15.0: move the pin back; v0.15.0 runs against the new column. To remove it as well, downgrade `8db003ab849e` to `e1f5a8c3b7d9` (drops the column and only the stored ID tokens). v0.15.0 has no `/auth/logout/redirect`, so point the sign-out button back at `POST /auth/logout` first.
 
+### From v0.16.0 to v0.16.1
+
+`saas-os-update check` reports `REVIEW_REQUIRED` for this move (exit 20, policy version 4; checked on 2026-11-25 against `main` at `fca3b04`, the last commit before the release pull request, from a copy of the scaffold pinned at v0.16.0 `f073a27`: 5 commits, 7 changed paths: documentation 3, architecture 2, provider boundary 1, tests 1). The path needing review is `saas_os/infra/local_identity/zitadel_bootstrap.py` (provider boundary, #296); the architecture paths are ADR-0064's status line and the ADR index. There is no migration (the head stays `8db003ab849e`), no changed public signature and no new setting. What changes:
+
+1. **Nothing to do for the library itself.** No runtime code, dependency, Compose file or setting changed.
+2. **If you run `saas-os-local-identity` or the `zitadel-bootstrap` service against a ZITADEL that uses Login V2** (ADR-0025): with v0.16.0, adding `OIDC_POST_LOGOUT_REDIRECT_URI` or turning on the userinfo assertion switched the application back to Login V1, without an error. Run the bootstrap of this release once; it keeps the login version on every update. To check, sign in and confirm the browser goes to `/ui/v2/login`. An application already moved back to Login V1 by v0.16.0 returns to Login V2 when this release's bootstrap runs with `ZITADEL_LOGIN_V2_BASE_URI` set.
+3. **Check the tag's signature** before pinning: `git tag -v v0.16.1`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
+4. **Rolling back** to v0.16.0: move the pin back. Both releases have the same migration head. The v0.16.0 bootstrap can switch the application back to Login V1 again, as described in step 2.
+
 ## 15. Product deployment checklist
 
 SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Before production, with evidence kept by the product:
