@@ -66,10 +66,12 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `cdede95`, `main` after pull request #287 (2026-11-17), the
-commit released as SaaS OS v0.15.0 (`CHANGELOG.md`): no migration (head
-`e1f5a8c3b7d9`) and the other changes that entry lists, including
-`saas_os.inference.settings`, which `ai_settings.py` uses. Before it, the pin
+The pin is `f073a27`, `main` after pull request #294 (2026-11-22), the
+commit released as SaaS OS v0.16.0 (`CHANGELOG.md`): one migration (head
+`8db003ab849e`) and the other changes that entry lists. Before it, the pin
+was `cdede95`, `main` after pull request #287 (2026-11-17), released as
+SaaS OS v0.15.0: no migration (head `e1f5a8c3b7d9`); it added
+`saas_os.inference.settings`, which `ai_settings.py` uses. Before that, the pin
 was `fb842ff`, `main` after pull request #280 (2026-11-16), released as
 SaaS OS v0.14.0: four migrations (head `e1f5a8c3b7d9`). Before that, the pin
 was `a2a9384`, `main` after pull request #267 (2026-11-14), released as
@@ -142,7 +144,8 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was checked for `cdede95` on 2026-11-22 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
+  was checked for `f073a27` on 2026-11-25 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
+  to `f073a27` (v0.16.0)"), for `cdede95` on 2026-11-22 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
   to `cdede95` (v0.15.0)"), for `fb842ff` on 2026-11-17 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
   to `fb842ff` (v0.14.0)"), for `a2a9384` on 2026-11-16 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
   to `a2a9384` (v0.13.0)"), for `c17c7b4` on 2026-11-14 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved

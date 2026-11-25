@@ -49,10 +49,11 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `cdede95`, `main` after pull
-request #287, released as SaaS OS v0.15.0 (`CHANGELOG.md`): no migration
-(head `e1f5a8c3b7d9`) and the other changes that entry lists. Before it, the
-pin was `fb842ff`, `main` after pull request #280, released as SaaS OS
+`tests/test_consumer_pins_unit.py`. It is `f073a27`, `main` after pull
+request #294, released as SaaS OS v0.16.0 (`CHANGELOG.md`): one migration
+(head `8db003ab849e`) and the other changes that entry lists. Before it, the
+pin was `cdede95`, `main` after pull request #287, released as SaaS OS
+v0.15.0: no migration (head `e1f5a8c3b7d9`). Before that, the pin was `fb842ff`, `main` after pull request #280, released as SaaS OS
 v0.14.0: four migrations (head `e1f5a8c3b7d9`). Before that, the pin was `a2a9384`, `main` after pull request #267, released as SaaS OS
 v0.13.0: one migration (head `e8a3c6f1d9b4`). Before that, the pin was `c17c7b4`, `main` after pull request #261, released as SaaS OS
 v0.12.0: no migration (head `c7d2a9f4e1b6`). Before that, the pin was `2158a81`, `main` after pull request #254, released as SaaS OS
@@ -101,9 +102,10 @@ feature-flag functions, and also the
 `saas_os` import root (ADR-0038), the worker's `extra_functions` seam
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
-is a recorded manual proof (`docs/P-ROADMAP.md`; for `cdede95` (v0.15.0)
-only the install and the import of `saas_os` were checked, on 2026-11-22,
-"Example pins moved to `cdede95` (v0.15.0)"; the same for `fb842ff` (v0.14.0)
+is a recorded manual proof (`docs/P-ROADMAP.md`; for `f073a27` (v0.16.0)
+only the install and the import of `saas_os` were checked, on 2026-11-25,
+"Example pins moved to `f073a27` (v0.16.0)"; the same for `cdede95` (v0.15.0)
+on 2026-11-22, "Example pins moved to `cdede95` (v0.15.0)", for `fb842ff` (v0.14.0)
 on 2026-11-17, "Example pins moved to `fb842ff` (v0.14.0)", for `a2a9384` (v0.13.0)
 on 2026-11-16, "Example pins moved to `a2a9384` (v0.13.0)", for `c17c7b4` (v0.12.0)
 on 2026-11-14, "Example pins moved to `c17c7b4` (v0.12.0)", and for `2158a81` (v0.11.0)

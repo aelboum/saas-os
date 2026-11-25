@@ -8,7 +8,18 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # cdede95 is `main` after pull request #287 (2026-11-17), released as
+    # f073a27 is `main` after pull request #294 (2026-11-22), released as
+    # v0.16.0 (CHANGELOG.md). Since cdede95 (#289-#294): one migration
+    # (head 8db003ab849e), OpenID Connect RP-initiated logout (opt-in,
+    # OIDC_POST_LOGOUT_REDIRECT_URI), IdentityProvider.build_end_session_url
+    # and the FastAPI floor fastapi>=0.142.
+    # `saas-os-update check`: REVIEW_REQUIRED (16 commits, 48 changed paths;
+    # architecture, authorization, dependency toolchain, documentation,
+    # migration, provider boundary, public API, tests and unknown); the
+    # paths are listed in docs/P-ROADMAP.md. The pinned-SHA install and
+    # import were checked for this move on 2026-11-25; the tests were not
+    # rerun (same place).
+    # Before it, cdede95 is `main` after pull request #287 (2026-11-17), released as
     # v0.15.0 (CHANGELOG.md). Since fb842ff (#281-#288): no migration (head
     # e1f5a8c3b7d9), the public package saas_os.inference.settings and four
     # system jobs off the worker's event loop.
@@ -16,7 +27,7 @@ dependencies = [
     # architecture, authorization, dependency toolchain, documentation,
     # internal, provider boundary, public API and tests); the paths are
     # listed in docs/P-ROADMAP.md. The pinned-SHA install and import were
-    # checked for this move on 2026-11-22; the tests were not rerun (same
+    # checked for that move on 2026-11-22; the tests were not rerun (same
     # place).
     # Before it, fb842ff is `main` after pull request #280 (2026-11-16), released as
     # v0.14.0 (CHANGELOG.md). Since a2a9384 (#268-#280): four migrations
@@ -211,7 +222,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@cdede956dd884fc816b234f1b546ce3b983b4efc",
+    "saas-os @ git+https://github.com/aelboum/saas-os@f073a2721c41fb455736217c48b24d0081cd7f5c",
 ]
 
 [build-system]
